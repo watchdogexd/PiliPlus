@@ -519,6 +519,24 @@ class PlPlayerController with BlockConfigMixin {
   late final checkIsAutoRotate = Platform.isAndroid && mode != .gravity;
   StreamSubscription<OrientationParams>? _orientationListener;
 
+  AppLifecycleListener? _appLifecycleListener;
+
+  // iOS drops the VideoToolbox session in background; decoding through it falls
+  // back to software. Disable video decode in background, restore on resume.
+  void _onAppLifecycleState(AppLifecycleState state) {
+    final player = _videoPlayerController;
+    if (player == null) return;
+    switch (state) {
+      case AppLifecycleState.hidden || AppLifecycleState.paused:
+        player.setVideoTrack(VideoTrack.no());
+      case AppLifecycleState.resumed:
+        player.setVideoTrack(
+          onlyPlayAudio.value ? VideoTrack.no() : VideoTrack.auto(),
+        );
+      default:
+    }
+  }
+
   void _stopOrientationListener() {
     _orientationListener?.cancel();
     _orientationListener = null;
@@ -568,6 +586,12 @@ class PlPlayerController with BlockConfigMixin {
 
   // 添加一个私有构造函数
   PlPlayerController._() {
+    if (Platform.isIOS) {
+      _appLifecycleListener = AppLifecycleListener(
+        onStateChange: _onAppLifecycleState,
+      );
+    }
+
     if (PlatformUtils.isMobile) {
       _orientationListener = NativeDeviceOrientationPlatform.instance
           .onOrientationChanged(
@@ -1626,6 +1650,8 @@ class PlPlayerController with BlockConfigMixin {
       showSystemBar();
     }
     danmakuController = null;
+    _appLifecycleListener?.dispose();
+    _appLifecycleListener = null;
     _stopOrientationListener();
     _disableAutoEnterPip();
     setPlayCallBack(null);
