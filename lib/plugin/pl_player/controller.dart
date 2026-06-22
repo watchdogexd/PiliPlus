@@ -519,6 +519,10 @@ class PlPlayerController with BlockConfigMixin {
   late final checkIsAutoRotate = Platform.isAndroid && mode != .gravity;
   StreamSubscription<OrientationParams>? _orientationListener;
 
+  // DIAGNOSTIC: trace app-lifecycle transitions alongside hwdec-current to see
+  // whether/when iOS drops hardware decoding across background/foreground.
+  AppLifecycleListener? _diagLifecycleListener;
+
   void _stopOrientationListener() {
     _orientationListener?.cancel();
     _orientationListener = null;
@@ -568,6 +572,16 @@ class PlPlayerController with BlockConfigMixin {
 
   // 添加一个私有构造函数
   PlPlayerController._() {
+    // DIAGNOSTIC: log lifecycle + hwdec-current across background/foreground.
+    _diagLifecycleListener = AppLifecycleListener(
+      onStateChange: (state) {
+        debugPrint(
+          'MPVDIAG lifecycle=$state '
+          'hwdec-current=${_videoPlayerController?.getProperty('hwdec-current')}',
+        );
+      },
+    );
+
     if (PlatformUtils.isMobile) {
       _orientationListener = NativeDeviceOrientationPlatform.instance
           .onOrientationChanged(
@@ -785,7 +799,7 @@ class PlPlayerController with BlockConfigMixin {
 
     final player = await Player.create(
       configuration: PlayerConfiguration(
-        logLevel: kDebugMode ? .warn : .error,
+        logLevel: MPVLogLevel.v, // DIAGNOSTIC: capture decoder/hwdec/VT logs
         options: opt,
       ),
     );
@@ -1019,14 +1033,10 @@ class PlPlayerController with BlockConfigMixin {
           isLive,
         );
       }),
-      if (kDebugMode)
-        stream.log.listen(((PlayerLog log) {
-          if (log.level == 'error' || log.level == 'fatal') {
-            Utils.reportError('${log.level}: ${log.prefix}: ${log.text}', null);
-          } else {
-            debugPrint(log.toString());
-          }
-        })),
+      // DIAGNOSTIC: always print mpv logs (tagged) so they show in release.
+      stream.log.listen(((PlayerLog log) {
+        debugPrint('MPVDIAG ${log.level} ${log.prefix}: ${log.text}');
+      })),
       stream.error.listen((String event) {
         if (dataSource is FileSource &&
             event.startsWith("Failed to open file")) {
@@ -1626,6 +1636,8 @@ class PlPlayerController with BlockConfigMixin {
       showSystemBar();
     }
     danmakuController = null;
+    _diagLifecycleListener?.dispose();
+    _diagLifecycleListener = null;
     _stopOrientationListener();
     _disableAutoEnterPip();
     setPlayCallBack(null);
