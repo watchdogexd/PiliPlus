@@ -77,7 +77,11 @@ final class SampleBufferPiPController: NSObject {
   }
 
   @objc private func onDidBecomeActive() {
-    if pipController?.isPictureInPictureActive != true {
+    // Returning to the app should dismiss the float (the inline player takes over again).
+    if pipController?.isPictureInPictureActive == true {
+      log("didBecomeActive while PiP active -> stop PiP")
+      pipController?.stopPictureInPicture()
+    } else {
       setTap(enabled: false)
     }
   }

@@ -494,7 +494,7 @@ class PlPlayerController with BlockConfigMixin {
       seekTo(position + Duration(milliseconds: (sec * 1000).round()));
     };
     IosPip.instance.onPipWillStart = () {
-      _isPipActive = true;
+      isPipActive.value = true;
       // Ensure the video track stays on so PiP keeps receiving frames in background.
       final player = _videoPlayerController;
       if (player != null && !onlyPlayAudio.value) {
@@ -502,7 +502,7 @@ class PlPlayerController with BlockConfigMixin {
       }
     };
     IosPip.instance.onPipDidStop = () {
-      _isPipActive = false;
+      isPipActive.value = false;
       // If PiP closed while the app is still backgrounded, drop decode to save power
       // (mirrors the background behaviour in _onAppLifecycleState).
       final player = _videoPlayerController;
@@ -608,7 +608,8 @@ class PlPlayerController with BlockConfigMixin {
 
   // iOS PiP shows the video while the app is backgrounded, so it needs live
   // frames; the background decode-disable below must not fire during PiP.
-  bool _isPipActive = false;
+  // Observable so the inline video can be hidden while PiP is up.
+  final RxBool isPipActive = false.obs;
   AppLifecycleState? _lastLifecycleState;
 
   // iOS drops the VideoToolbox session in background; decoding through it falls
@@ -620,7 +621,7 @@ class PlPlayerController with BlockConfigMixin {
     switch (state) {
       case AppLifecycleState.hidden || AppLifecycleState.paused:
         // Keep decoding while PiP is presenting video; it needs the frames.
-        if (_isPipActive) return;
+        if (isPipActive.value) return;
         player.setVideoTrack(VideoTrack.no());
       case AppLifecycleState.resumed:
         player.setVideoTrack(

@@ -2068,6 +2068,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
             key: _videoKey,
             child: Obx(
               () {
+                // While iOS PiP shows the video, hide the inline copy (mpv keeps decoding
+                // to feed the float). Prevents two videos playing at once.
+                if (plPlayerController.isPipActive.value) {
+                  return const ColoredBox(color: Colors.black);
+                }
                 final videoFit = plPlayerController.videoFit.value;
                 return Transform.flip(
                   flipX: plPlayerController.flipX.value,
