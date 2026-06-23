@@ -175,17 +175,16 @@ final class SampleBufferPiPController: NSObject {
       log("attachView: no Flutter view found yet")
       return
     }
-    sampleBufferView.translatesAutoresizingMaskIntoConstraints = false
+    // Keep the source view effectively invisible (1x1). A subview renders ON TOP of the
+    // FlutterView, so a full-size layer would double the video and leave a stuck frame when
+    // PiP stops. PiP pulls full-resolution frames from the layer's buffer queue regardless of
+    // the on-screen view size.
+    sampleBufferView.translatesAutoresizingMaskIntoConstraints = true
+    sampleBufferView.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
     sampleBufferView.isUserInteractionEnabled = false
     host.insertSubview(sampleBufferView, at: 0)
-    NSLayoutConstraint.activate([
-      sampleBufferView.leadingAnchor.constraint(equalTo: host.leadingAnchor),
-      sampleBufferView.trailingAnchor.constraint(equalTo: host.trailingAnchor),
-      sampleBufferView.topAnchor.constraint(equalTo: host.topAnchor),
-      sampleBufferView.bottomAnchor.constraint(equalTo: host.bottomAnchor),
-    ])
     viewAttached = true
-    log("attachView: attached display layer to Flutter view")
+    log("attachView: attached 1x1 display layer to Flutter view")
   }
 
   private static func findFlutterView() -> UIView? {
@@ -276,7 +275,9 @@ extension SampleBufferPiPController: AVPictureInPictureSampleBufferPlaybackDeleg
   func pictureInPictureController(
     _ c: AVPictureInPictureController, setPlaying playing: Bool
   ) {
+    isPlaying = playing  // optimistic so the play/pause icon tracks immediately
     channel.invokeMethod("setPlaying", arguments: playing)
+    c.invalidatePlaybackState()
   }
 
   func pictureInPictureControllerTimeRangeForPlayback(
@@ -322,6 +323,15 @@ extension SampleBufferPiPController: AVPictureInPictureControllerDelegate {
     log("DID stop")
     channel.invokeMethod("pipDidStop", arguments: nil)
     setTap(enabled: false)
+    sampleBufferView.displayLayer.flushAndRemoveImage()
+  }
+
+  // Required for a clean dismissal back to the app.
+  func pictureInPictureController(
+    _ c: AVPictureInPictureController,
+    restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+  ) {
+    completionHandler(true)
   }
 
   func pictureInPictureController(
