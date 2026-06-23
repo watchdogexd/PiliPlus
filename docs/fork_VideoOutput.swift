@@ -14,9 +14,17 @@
 #endif
 
 #if os(iOS)
+import QuartzCore
+
 final class MediaKitPiPTap {
   static let shared = MediaKitPiPTap()
   private var enabledTextureId: Int64 = -1
+  // Full rate (every frame) only while the PiP window is actually on screen. Otherwise we
+  // just keep the AVSampleBufferDisplayLayer "warm" at a trickle so iOS auto-PiP stays
+  // possible the instant the app backgrounds — at a fraction of the per-frame cost.
+  private var fullRate = false
+  private var lastPost: CFTimeInterval = 0
+  private let trickleInterval: CFTimeInterval = 0.5  // ~2 fps while warming
   private init() {
     NotificationCenter.default.addObserver(
       forName: Notification.Name("MediaKitPiPTapControl"), object: nil, queue: nil
@@ -25,9 +33,21 @@ final class MediaKitPiPTap {
       let enabled = (info["enabled"] as? Bool) ?? false
       let tid = (info["textureId"] as? NSNumber)?.int64Value ?? -1
       self.enabledTextureId = enabled ? tid : -1
+      self.fullRate = (info["fullRate"] as? Bool) ?? false
     }
   }
   func isEnabled(_ id: Int64) -> Bool { id != -1 && id == enabledTextureId }
+  // Gate the expensive copyPixelBuffer + post: every frame during PiP, ~2 fps while warming.
+  func shouldPost(_ id: Int64) -> Bool {
+    guard isEnabled(id) else { return false }
+    if fullRate { return true }
+    let now = CACurrentMediaTime()
+    if now - lastPost >= trickleInterval {
+      lastPost = now
+      return true
+    }
+    return false
+  }
 }
 #endif
 
@@ -186,7 +206,8 @@ public class VideoOutput: NSObject {
           name: Notification.Name("MediaKitPiPHwdec"), object: nil,
           userInfo: ["value": hwdec])
       }
-      if let pb = texture.copyPixelBuffer()?.takeRetainedValue() {
+      if MediaKitPiPTap.shared.shouldPost(textureId),
+        let pb = texture.copyPixelBuffer()?.takeRetainedValue() {
         NotificationCenter.default.post(
           name: Notification.Name("MediaKitPiPFrame"), object: nil,
           userInfo: ["textureId": NSNumber(value: textureId), "pixelBuffer": pb])

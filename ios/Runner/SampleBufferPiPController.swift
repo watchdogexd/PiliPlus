@@ -22,6 +22,7 @@ final class SampleBufferPiPController: NSObject {
   static let tapControlNotification = Notification.Name("MediaKitPiPTapControl")
   static let tapEnabledKey = "enabled"
   static let tapTextureIdKey = "textureId"
+  static let tapFullRateKey = "fullRate"
   static let hwdecNotification = Notification.Name("MediaKitPiPHwdec")  // fork -> app, diagnostic
 
   private let channel: FlutterMethodChannel
@@ -81,8 +82,9 @@ final class SampleBufferPiPController: NSObject {
     if pipController?.isPictureInPictureActive == true {
       log("didBecomeActive while PiP active -> stop PiP")
       pipController?.stopPictureInPicture()
-    } else {
-      setTap(enabled: false)
+    } else if pipController != nil {
+      // Keep the layer warm (trickle) so a later background still auto-PiPs.
+      setTap(enabled: true, fullRate: false)
     }
   }
 
@@ -150,6 +152,9 @@ final class SampleBufferPiPController: NSObject {
       controller.delegate = self
       pipController = controller
     }
+    // Warm the layer immediately (trickle) so native auto-PiP is possible even if the user
+    // backgrounds right after the first frame, not only after watching for a while.
+    setTap(enabled: true, fullRate: false)
     log("setup textureId=\(textureId) isLive=\(isLive)")
   }
 
@@ -246,10 +251,17 @@ final class SampleBufferPiPController: NSObject {
     return nil
   }
 
-  private func setTap(enabled: Bool) {
+  // enabled:false stops the tap entirely. enabled:true with fullRate:false keeps the layer
+  // "warm" at ~2 fps (cheap) so iOS auto-PiP is possible the instant we background; fullRate:true
+  // feeds every frame, used only while the PiP window is on screen.
+  private func setTap(enabled: Bool, fullRate: Bool = false) {
     NotificationCenter.default.post(
       name: Self.tapControlNotification, object: nil,
-      userInfo: [Self.tapEnabledKey: enabled, Self.tapTextureIdKey: NSNumber(value: activeTextureId)])
+      userInfo: [
+        Self.tapEnabledKey: enabled,
+        Self.tapTextureIdKey: NSNumber(value: activeTextureId),
+        Self.tapFullRateKey: fullRate,
+      ])
   }
 
   // MARK: - Frame ingestion
@@ -361,13 +373,15 @@ extension SampleBufferPiPController: AVPictureInPictureControllerDelegate {
 
   func pictureInPictureControllerDidStartPictureInPicture(_ c: AVPictureInPictureController) {
     log("DID start")
+    // Window is on screen now: feed every frame for smooth playback.
+    setTap(enabled: true, fullRate: true)
   }
 
   func pictureInPictureControllerDidStopPictureInPicture(_ c: AVPictureInPictureController) {
     log("DID stop")
     channel.invokeMethod("pipDidStop", arguments: nil)
-    setTap(enabled: false)
-    sampleBufferView.displayLayer.flushAndRemoveImage()
+    // Drop back to the warm trickle (don't flush) so the next PiP can start instantly.
+    setTap(enabled: true, fullRate: false)
   }
 
   // Required for a clean dismissal back to the app.
