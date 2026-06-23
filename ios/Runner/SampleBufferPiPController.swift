@@ -37,6 +37,7 @@ final class SampleBufferPiPController: NSObject {
 
   private var frameCount = 0
   private var frameMismatchLogged = false
+  private var timebase: CMTimebase?
 
   private var isPlaying = false
   private var isLive = false
@@ -114,6 +115,7 @@ final class SampleBufferPiPController: NSObject {
       isPlaying = (args?["isPlaying"] as? Bool) ?? isPlaying
       positionSeconds = (args?["position"] as? NSNumber)?.doubleValue ?? positionSeconds
       durationSeconds = (args?["duration"] as? NSNumber)?.doubleValue ?? durationSeconds
+      syncTimebase()
       pipController?.invalidatePlaybackState()
       result(nil)
     default:
@@ -125,18 +127,44 @@ final class SampleBufferPiPController: NSObject {
 
   private func setup(textureId: Int64) {
     attachViewIfNeeded()
+    setupTimebaseIfNeeded()
     activeTextureId = textureId
     formatDescription = nil
     frameCount = 0
     frameMismatchLogged = false
 
-    let content = AVPictureInPictureController.ContentSource(
-      sampleBufferDisplayLayer: sampleBufferView.displayLayer, playbackDelegate: self)
-    let controller = AVPictureInPictureController(contentSource: content)
-    controller.canStartPictureInPictureAutomaticallyFromInline = true
-    controller.delegate = self
-    pipController = controller
+    // New stream: clear any frames from the previous one.
+    sampleBufferView.displayLayer.flushAndRemoveImage()
+
+    // Create the controller ONCE; it's bound to the persistent display layer. Recreating it
+    // on every texture switch deallocated the in-flight controller -> EXC_BAD_ACCESS.
+    if pipController == nil {
+      let content = AVPictureInPictureController.ContentSource(
+        sampleBufferDisplayLayer: sampleBufferView.displayLayer, playbackDelegate: self)
+      let controller = AVPictureInPictureController(contentSource: content)
+      controller.canStartPictureInPictureAutomaticallyFromInline = true
+      controller.delegate = self
+      pipController = controller
+    }
     log("setup textureId=\(textureId) isLive=\(isLive)")
+  }
+
+  private func setupTimebaseIfNeeded() {
+    guard timebase == nil else { return }
+    var tb: CMTimebase?
+    CMTimebaseCreateWithSourceClock(
+      allocator: kCFAllocatorDefault, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &tb)
+    guard let tb = tb else { return }
+    timebase = tb
+    sampleBufferView.displayLayer.controlTimebase = tb
+    CMTimebaseSetTime(tb, time: .zero)
+    CMTimebaseSetRate(tb, rate: 0.0)
+  }
+
+  private func syncTimebase() {
+    guard let tb = timebase else { return }
+    CMTimebaseSetTime(tb, time: CMTime(seconds: positionSeconds, preferredTimescale: 600))
+    CMTimebaseSetRate(tb, rate: isPlaying ? 1.0 : 0.0)
   }
 
   private func start() {
@@ -286,6 +314,7 @@ extension SampleBufferPiPController: AVPictureInPictureSampleBufferPlaybackDeleg
     _ c: AVPictureInPictureController, setPlaying playing: Bool
   ) {
     isPlaying = playing  // optimistic so the play/pause icon tracks immediately
+    if let tb = timebase { CMTimebaseSetRate(tb, rate: playing ? 1.0 : 0.0) }
     channel.invokeMethod("setPlaying", arguments: playing)
     c.invalidatePlaybackState()
   }
@@ -311,6 +340,7 @@ extension SampleBufferPiPController: AVPictureInPictureSampleBufferPlaybackDeleg
     _ c: AVPictureInPictureController, skipByInterval skipInterval: CMTime,
     completion completionHandler: @escaping () -> Void
   ) {
+    log("skipByInterval \(skipInterval.seconds)")
     channel.invokeMethod("skip", arguments: skipInterval.seconds)
     completionHandler()
   }
