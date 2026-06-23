@@ -21,61 +21,30 @@ import UIKit
       NSLog("AVAudioSession setup failed: \(error)")
     }
 
-    let didFinish = super.application(application, didFinishLaunchingWithOptions: launchOptions)
-    setupPiPChannelIfNeeded()
-    return didFinish
-  }
-
-  // With the implicit-engine AppDelegate, the FlutterViewController isn't the root yet at
-  // didFinishLaunching. Retry once the app is active and the view hierarchy exists.
-  override func applicationDidBecomeActive(_ application: UIApplication) {
-    super.applicationDidBecomeActive(application)
-    setupPiPChannelIfNeeded()
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    // Register the PiP channel on the same registry as every other plugin. This binds it to
+    // the engine's messenger directly, with no dependency on window.rootViewController timing.
+    setupPiP(registry: engineBridge.pluginRegistry)
   }
 
-  private func setupPiPChannelIfNeeded() {
+  private func setupPiP(registry: FlutterPluginRegistry) {
     guard #available(iOS 15.0, *) else { return }
-    guard pipController == nil else { return }  // already set up
-
-    guard let controller = findFlutterViewController() else {
-      NSLog("[PiP] setup deferred: no FlutterViewController yet (root=\(String(describing: window?.rootViewController)))")
+    guard let registrar = registry.registrar(forPlugin: "PiliPlusPiP") else {
+      NSLog("[PiP] no registrar available")
       return
     }
-
     let channel = FlutterMethodChannel(
-      name: AppDelegate.pipChannelName, binaryMessenger: controller.binaryMessenger)
-    let pip = SampleBufferPiPController(channel: channel, hostView: controller.view)
+      name: AppDelegate.pipChannelName, binaryMessenger: registrar.messenger())
+    let pip = SampleBufferPiPController(channel: channel)
     pipController = pip
     channel.setMethodCallHandler { [weak pip] call, result in
       guard let pip = pip else { result(nil); return }
       pip.handle(call, result: result)
     }
-    NSLog("[PiP] channel + controller set up")
-  }
-
-  // The root may be the FlutterViewController directly, or wrapped in a container.
-  private func findFlutterViewController() -> FlutterViewController? {
-    func search(_ vc: UIViewController?) -> FlutterViewController? {
-      guard let vc = vc else { return nil }
-      if let fvc = vc as? FlutterViewController { return fvc }
-      if let presented = vc.presentedViewController, let f = search(presented) { return f }
-      for child in vc.children {
-        if let f = search(child) { return f }
-      }
-      return nil
-    }
-    if let fromWindow = search(window?.rootViewController) { return fromWindow }
-    // Fallback: scan all connected scene windows.
-    for scene in UIApplication.shared.connectedScenes {
-      guard let ws = scene as? UIWindowScene else { continue }
-      for w in ws.windows {
-        if let f = search(w.rootViewController) { return f }
-      }
-    }
-    return nil
+    NSLog("[PiP] channel registered via plugin registrar")
   }
 }

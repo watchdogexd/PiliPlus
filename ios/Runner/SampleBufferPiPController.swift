@@ -24,7 +24,7 @@ final class SampleBufferPiPController: NSObject {
   static let tapTextureIdKey = "textureId"
 
   private let channel: FlutterMethodChannel
-  private weak var hostView: UIView?
+  private var viewAttached = false
 
   private let sampleBufferView = SampleBufferDisplayView()
   private var pipController: AVPictureInPictureController?
@@ -42,20 +42,9 @@ final class SampleBufferPiPController: NSObject {
   private var positionSeconds: Double = 0
   private var durationSeconds: Double = 0
 
-  init(channel: FlutterMethodChannel, hostView: UIView) {
+  init(channel: FlutterMethodChannel) {
     self.channel = channel
-    self.hostView = hostView
     super.init()
-
-    sampleBufferView.translatesAutoresizingMaskIntoConstraints = false
-    sampleBufferView.isUserInteractionEnabled = false
-    hostView.insertSubview(sampleBufferView, at: 0)
-    NSLayoutConstraint.activate([
-      sampleBufferView.leadingAnchor.constraint(equalTo: hostView.leadingAnchor),
-      sampleBufferView.trailingAnchor.constraint(equalTo: hostView.trailingAnchor),
-      sampleBufferView.topAnchor.constraint(equalTo: hostView.topAnchor),
-      sampleBufferView.bottomAnchor.constraint(equalTo: hostView.bottomAnchor),
-    ])
 
     NotificationCenter.default.addObserver(
       self, selector: #selector(onFrame(_:)), name: Self.frameNotification, object: nil)
@@ -125,6 +114,7 @@ final class SampleBufferPiPController: NSObject {
   // MARK: - Lifecycle
 
   private func setup(textureId: Int64) {
+    attachViewIfNeeded()
     activeTextureId = textureId
     formatDescription = nil
     frameCount = 0
@@ -173,6 +163,44 @@ final class SampleBufferPiPController: NSObject {
     pipController = nil
     activeTextureId = -1
     sampleBufferView.displayLayer.flushAndRemoveImage()
+  }
+
+  // The display layer must live in the on-screen view hierarchy for PiP to be possible.
+  // The FlutterViewController exists by the time a video is playing (when setup runs).
+  private func attachViewIfNeeded() {
+    guard !viewAttached else { return }
+    guard let host = Self.findFlutterView() else {
+      log("attachView: no Flutter view found yet")
+      return
+    }
+    sampleBufferView.translatesAutoresizingMaskIntoConstraints = false
+    sampleBufferView.isUserInteractionEnabled = false
+    host.insertSubview(sampleBufferView, at: 0)
+    NSLayoutConstraint.activate([
+      sampleBufferView.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+      sampleBufferView.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+      sampleBufferView.topAnchor.constraint(equalTo: host.topAnchor),
+      sampleBufferView.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+    ])
+    viewAttached = true
+    log("attachView: attached display layer to Flutter view")
+  }
+
+  private static func findFlutterView() -> UIView? {
+    func search(_ vc: UIViewController?) -> FlutterViewController? {
+      guard let vc = vc else { return nil }
+      if let f = vc as? FlutterViewController { return f }
+      if let p = vc.presentedViewController, let f = search(p) { return f }
+      for c in vc.children { if let f = search(c) { return f } }
+      return nil
+    }
+    for scene in UIApplication.shared.connectedScenes {
+      guard let ws = scene as? UIWindowScene else { continue }
+      for w in ws.windows {
+        if let f = search(w.rootViewController) { return f.view }
+      }
+    }
+    return nil
   }
 
   private func setTap(enabled: Bool) {
