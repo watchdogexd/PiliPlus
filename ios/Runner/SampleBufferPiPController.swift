@@ -141,13 +141,15 @@ final class SampleBufferPiPController: NSObject {
 
   private func attemptStart(_ controller: AVPictureInPictureController, retries: Int) {
     if controller.isPictureInPictureActive { return }
-    if controller.isPictureInPicturePossible {
-      log("possible=true -> startPictureInPicture (frames=\(frameCount))")
+    // Require at least one enqueued frame; starting with an empty layer fails with
+    // PGPegasusErrorDomain -1003.
+    if controller.isPictureInPicturePossible && frameCount > 0 {
+      log("possible + frames=\(frameCount) -> startPictureInPicture")
       controller.startPictureInPicture()
       return
     }
     if retries <= 0 {
-      log("gave up: not possible. frames=\(frameCount) layerStatus=\(sampleBufferView.displayLayer.status.rawValue) tap=\(activeTextureId)")
+      log("gave up: possible=\(controller.isPictureInPicturePossible) frames=\(frameCount) layerStatus=\(sampleBufferView.displayLayer.status.rawValue)")
       return
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
