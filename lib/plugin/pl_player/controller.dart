@@ -490,6 +490,26 @@ class PlPlayerController with BlockConfigMixin {
     IosPip.instance.onSkip = (sec) {
       seekTo(position + Duration(milliseconds: (sec * 1000).round()));
     };
+    IosPip.instance.onPipWillStart = () {
+      _isPipActive = true;
+      // Ensure the video track stays on so PiP keeps receiving frames in background.
+      final player = _videoPlayerController;
+      if (player != null && !onlyPlayAudio.value) {
+        player.setVideoTrack(VideoTrack.auto());
+      }
+    };
+    IosPip.instance.onPipDidStop = () {
+      _isPipActive = false;
+      // If PiP closed while the app is still backgrounded, drop decode to save power
+      // (mirrors the background behaviour in _onAppLifecycleState).
+      final player = _videoPlayerController;
+      if (player == null) return;
+      final state = _lastLifecycleState;
+      if (state == AppLifecycleState.hidden ||
+          state == AppLifecycleState.paused) {
+        player.setVideoTrack(VideoTrack.no());
+      }
+    };
     IosPip.instance.ensureSupported().then((ok) {
       if (!ok || _videoController != vc) return;
       late final VoidCallback idListener;
@@ -580,13 +600,21 @@ class PlPlayerController with BlockConfigMixin {
 
   AppLifecycleListener? _appLifecycleListener;
 
+  // iOS PiP shows the video while the app is backgrounded, so it needs live
+  // frames; the background decode-disable below must not fire during PiP.
+  bool _isPipActive = false;
+  AppLifecycleState? _lastLifecycleState;
+
   // iOS drops the VideoToolbox session in background; decoding through it falls
   // back to software. Disable video decode in background, restore on resume.
   void _onAppLifecycleState(AppLifecycleState state) {
+    _lastLifecycleState = state;
     final player = _videoPlayerController;
     if (player == null) return;
     switch (state) {
       case AppLifecycleState.hidden || AppLifecycleState.paused:
+        // Keep decoding while PiP is presenting video; it needs the frames.
+        if (_isPipActive) return;
         player.setVideoTrack(VideoTrack.no());
       case AppLifecycleState.resumed:
         player.setVideoTrack(

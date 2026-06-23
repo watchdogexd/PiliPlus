@@ -67,6 +67,26 @@ final class SampleBufferPiPController: NSObject {
     NotificationCenter.default.addObserver(
       self, selector: #selector(onFrame(_:)),
       name: Self.frameNotification, object: nil)
+
+    // Feed frames only around backgrounding / PiP, never during normal foreground
+    // playback. willResignActive fires before the app backgrounds, so auto-enter PiP
+    // (canStartPictureInPictureAutomaticallyFromInline) has frames ready in time.
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(onWillResignActive),
+      name: UIApplication.willResignActiveNotification, object: nil)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(onDidBecomeActive),
+      name: UIApplication.didBecomeActiveNotification, object: nil)
+  }
+
+  @objc private func onWillResignActive() {
+    // Only if PiP has been set up for the current video.
+    if pipController != nil { setTap(enabled: true) }
+  }
+
+  @objc private func onDidBecomeActive() {
+    // Back in foreground and not in PiP -> stop feeding to save power.
+    if pipController?.isPictureInPictureActive != true { setTap(enabled: false) }
   }
 
   deinit {
@@ -120,9 +140,7 @@ final class SampleBufferPiPController: NSObject {
     controller.canStartPictureInPictureAutomaticallyFromInline = true
     controller.delegate = self
     pipController = controller
-
-    // Turn on the per-frame tap in the media_kit fork for this texture.
-    setTap(enabled: true)
+    // Tap stays off during foreground playback; enabled on background / explicit start.
   }
 
   // Explicit "enter PiP now" (the PiP button). Auto-enter on background is handled by

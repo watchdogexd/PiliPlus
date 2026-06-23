@@ -111,11 +111,15 @@ implement it).
 - **VOD scrubber.** `timeRangeForPlayback` reports `0..duration`; we call `invalidatePlaybackState`
   on each `updateState`. If the scrubber drifts, push position more often than 1 Hz while in PiP.
 - **Auto-enter.** `canStartPictureInPictureAutomaticallyFromInline = true` makes iOS start PiP when
-  the app backgrounds on the video page. The frame tap is enabled in `setup()`; if auto-enter
-  misses the first frames, also enable the tap on `applicationWillResignActive`.
+  the app backgrounds on the video page. **Handled:** the frame tap is gated to background/PiP only
+  — enabled on `willResignActive` (fires before backgrounding, so auto-enter has frames) and the
+  explicit PiP button, disabled on `didBecomeActive` (foreground, not in PiP) and `pipDidStop`. So
+  no frames flow during normal foreground playback. If auto-enter still races on slow devices,
+  widen the window (enter tap slightly earlier / keep it on a beat longer).
 - **Background decode.** Commit `e36ec96` disables the video track in background to keep hwdec.
-  That logic must **not** fire while PiP is active (PiP is "background" but needs frames). Gate the
-  `setVideoTrack(VideoTrack.no())` path on "not currently in PiP".
+  **Handled:** `_onAppLifecycleState` now early-returns when `_isPipActive`, and the PiP
+  start/stop callbacks keep the video track on during PiP (and drop it again if PiP closes while
+  still backgrounded). Verify the ordering holds on-device (PiP "will start" vs the lifecycle event).
 - **Danmaku in PiP.** System PiP shows only the SBDL contents, so danmaku won't appear — matches the
   official app. To burn danmaku in, composite it onto the pixel buffer before enqueuing (extra GPU).
 
