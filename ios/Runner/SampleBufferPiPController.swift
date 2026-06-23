@@ -10,23 +10,16 @@ import UIKit
 // media_kit renders mpv frames into a Flutter texture (a CVPixelBuffer), so there is
 // no AVPlayerLayer for the system to pull into PiP. The only route for a custom
 // (non-AVPlayer) engine is AVSampleBufferDisplayLayer + an
-// AVPictureInPictureControllerContentSource (iOS 15+). This is the same approach a
-// custom FFmpeg player (e.g. Bilibili's ijkplayer lineage) must use.
+// AVPictureInPictureControllerContentSource (iOS 15+). Frames arrive from the patched
+// VideoOutput in the media_kit fork via NotificationCenter.
 //
-// Frames arrive from the patched VideoOutput in the media_kit fork via NotificationCenter
-// (decoupled — Runner does not import the plugin). We wrap each CVPixelBuffer into a
-// CMSampleBuffer and enqueue it into the display layer. Transport controls (play/pause/
-// seek) are forwarded to Dart over a MethodChannel and applied to PlPlayerController.
-//
-// NOTE: untested on-device; treat as a first implementation to iterate on. Known tuning
-// points are flagged with `// TUNE:`.
+// Diagnostics are routed through the channel ("log") so they appear in `flutter run`.
 @available(iOS 15.0, *)
 final class SampleBufferPiPController: NSObject {
-  // Notification contract shared with the media_kit fork patch (see guide).
-  static let frameNotification = Notification.Name("MediaKitPiPFrame")        // fork -> app (per frame)
+  static let frameNotification = Notification.Name("MediaKitPiPFrame")
   static let frameTextureIdKey = "textureId"
   static let framePixelBufferKey = "pixelBuffer"
-  static let tapControlNotification = Notification.Name("MediaKitPiPTapControl") // app -> fork (enable/disable)
+  static let tapControlNotification = Notification.Name("MediaKitPiPTapControl")
   static let tapEnabledKey = "enabled"
   static let tapTextureIdKey = "textureId"
 
@@ -41,9 +34,11 @@ final class SampleBufferPiPController: NSObject {
   private var lastPixelBufferWidth: Int = 0
   private var lastPixelBufferHeight: Int = 0
 
-  // State pushed from Dart so the PiP transport bar is accurate.
-  private var isPlaying: Bool = false
-  private var isLive: Bool = false
+  private var frameCount = 0
+  private var frameMismatchLogged = false
+
+  private var isPlaying = false
+  private var isLive = false
   private var positionSeconds: Double = 0
   private var durationSeconds: Double = 0
 
@@ -52,8 +47,6 @@ final class SampleBufferPiPController: NSObject {
     self.hostView = hostView
     super.init()
 
-    // Insert the sample-buffer layer behind the Flutter view. The Flutter video texture
-    // is drawn on top during normal playback; this layer only becomes visible inside PiP.
     sampleBufferView.translatesAutoresizingMaskIntoConstraints = false
     sampleBufferView.isUserInteractionEnabled = false
     hostView.insertSubview(sampleBufferView, at: 0)
@@ -65,35 +58,38 @@ final class SampleBufferPiPController: NSObject {
     ])
 
     NotificationCenter.default.addObserver(
-      self, selector: #selector(onFrame(_:)),
-      name: Self.frameNotification, object: nil)
-
-    // Feed frames only around backgrounding / PiP, never during normal foreground
-    // playback. willResignActive fires before the app backgrounds, so auto-enter PiP
-    // (canStartPictureInPictureAutomaticallyFromInline) has frames ready in time.
+      self, selector: #selector(onFrame(_:)), name: Self.frameNotification, object: nil)
     NotificationCenter.default.addObserver(
       self, selector: #selector(onWillResignActive),
       name: UIApplication.willResignActiveNotification, object: nil)
     NotificationCenter.default.addObserver(
       self, selector: #selector(onDidBecomeActive),
       name: UIApplication.didBecomeActiveNotification, object: nil)
+
+    log("init; PiP supported=\(AVPictureInPictureController.isPictureInPictureSupported())")
+  }
+
+  deinit { NotificationCenter.default.removeObserver(self) }
+
+  private func log(_ s: String) {
+    NSLog("[PiP] \(s)")
+    DispatchQueue.main.async { self.channel.invokeMethod("log", arguments: s) }
   }
 
   @objc private func onWillResignActive() {
-    // Only if PiP has been set up for the current video.
-    if pipController != nil { setTap(enabled: true) }
+    if pipController != nil {
+      log("willResignActive -> enable tap")
+      setTap(enabled: true)
+    }
   }
 
   @objc private func onDidBecomeActive() {
-    // Back in foreground and not in PiP -> stop feeding to save power.
-    if pipController?.isPictureInPictureActive != true { setTap(enabled: false) }
+    if pipController?.isPictureInPictureActive != true {
+      setTap(enabled: false)
+    }
   }
 
-  deinit {
-    NotificationCenter.default.removeObserver(self)
-  }
-
-  // MARK: - Public API (called from AppDelegate's MethodChannel handler)
+  // MARK: - MethodChannel
 
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
@@ -119,7 +115,7 @@ final class SampleBufferPiPController: NSObject {
       isPlaying = (args?["isPlaying"] as? Bool) ?? isPlaying
       positionSeconds = (args?["position"] as? NSNumber)?.doubleValue ?? positionSeconds
       durationSeconds = (args?["duration"] as? NSNumber)?.doubleValue ?? durationSeconds
-      if let c = pipController { c.invalidatePlaybackState() }
+      pipController?.invalidatePlaybackState()
       result(nil)
     default:
       result(FlutterMethodNotImplemented)
@@ -131,34 +127,45 @@ final class SampleBufferPiPController: NSObject {
   private func setup(textureId: Int64) {
     activeTextureId = textureId
     formatDescription = nil
+    frameCount = 0
+    frameMismatchLogged = false
 
     let content = AVPictureInPictureController.ContentSource(
-      sampleBufferDisplayLayer: sampleBufferView.displayLayer,
-      playbackDelegate: self)
+      sampleBufferDisplayLayer: sampleBufferView.displayLayer, playbackDelegate: self)
     let controller = AVPictureInPictureController(contentSource: content)
-    // Let iOS auto-enter PiP when the app backgrounds while the video page is up.
     controller.canStartPictureInPictureAutomaticallyFromInline = true
     controller.delegate = self
     pipController = controller
-    // Tap stays off during foreground playback; enabled on background / explicit start.
+    log("setup textureId=\(textureId) isLive=\(isLive)")
   }
 
-  // Explicit "enter PiP now" (the PiP button). Auto-enter on background is handled by
-  // canStartPictureInPictureAutomaticallyFromInline.
   private func start() {
-    guard let controller = pipController else { return }
+    guard let controller = pipController else {
+      log("start: NO controller (setup not run yet)")
+      return
+    }
     setTap(enabled: true)
-    // Give the layer a couple of frames before asking the system to start.
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-      if controller.isPictureInPicturePossible {
-        controller.startPictureInPicture()
-      }
+    log("start requested; possible=\(controller.isPictureInPicturePossible) frames=\(frameCount)")
+    attemptStart(controller, retries: 25)  // ~2.5s
+  }
+
+  private func attemptStart(_ controller: AVPictureInPictureController, retries: Int) {
+    if controller.isPictureInPictureActive { return }
+    if controller.isPictureInPicturePossible {
+      log("possible=true -> startPictureInPicture (frames=\(frameCount))")
+      controller.startPictureInPicture()
+      return
+    }
+    if retries <= 0 {
+      log("gave up: not possible. frames=\(frameCount) layerStatus=\(sampleBufferView.displayLayer.status.rawValue) tap=\(activeTextureId)")
+      return
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+      self?.attemptStart(controller, retries: retries - 1)
     }
   }
 
-  private func stop() {
-    pipController?.stopPictureInPicture()
-  }
+  private func stop() { pipController?.stopPictureInPicture() }
 
   private func dispose() {
     setTap(enabled: false)
@@ -179,18 +186,28 @@ final class SampleBufferPiPController: NSObject {
   @objc private func onFrame(_ note: Notification) {
     guard let info = note.userInfo,
           let tid = (info[Self.frameTextureIdKey] as? NSNumber)?.int64Value,
-          tid == activeTextureId,
           let pbObj = info[Self.framePixelBufferKey],
           CFGetTypeID(pbObj as CFTypeRef) == CVPixelBufferGetTypeID()
     else { return }
+    if tid != activeTextureId {
+      if !frameMismatchLogged {
+        log("frame for texture \(tid) but active=\(activeTextureId); ignoring")
+        frameMismatchLogged = true
+      }
+      return
+    }
     let pixelBuffer = pbObj as! CVPixelBuffer
+    frameCount += 1
+    if frameCount == 1 {
+      log("first frame texture=\(tid) \(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))")
+    }
     enqueue(pixelBuffer)
   }
 
   private func enqueue(_ pixelBuffer: CVPixelBuffer) {
     let layer = sampleBufferView.displayLayer
-
     if layer.status == .failed {
+      log("layer failed (\(String(describing: layer.error))) -> flush")
       layer.flush()
     }
 
@@ -199,20 +216,18 @@ final class SampleBufferPiPController: NSObject {
     if formatDescription == nil || w != lastPixelBufferWidth || h != lastPixelBufferHeight {
       formatDescription = nil
       CMVideoFormatDescriptionCreateForImageBuffer(
-        allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer,
-        formatDescriptionOut: &formatDescription)
+        allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer, formatDescriptionOut: &formatDescription)
       lastPixelBufferWidth = w
       lastPixelBufferHeight = h
     }
     guard let fd = formatDescription else { return }
 
-    // DisplayImmediately avoids depending on a precise timeline clock for the PiP preview.
     var timing = CMSampleTimingInfo(
       duration: .invalid, presentationTimeStamp: .invalid, decodeTimeStamp: .invalid)
     var sampleBuffer: CMSampleBuffer?
     let err = CMSampleBufferCreateReadyWithImageBuffer(
-      allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer,
-      formatDescription: fd, sampleTiming: &timing, sampleBufferOut: &sampleBuffer)
+      allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer, formatDescription: fd,
+      sampleTiming: &timing, sampleBufferOut: &sampleBuffer)
     guard err == noErr, let sb = sampleBuffer else { return }
 
     if let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true)
@@ -220,82 +235,73 @@ final class SampleBufferPiPController: NSObject {
       dict[kCMSampleAttachmentKey_DisplayImmediately as NSString] = true
     }
 
-    if layer.isReadyForMoreMediaData {
-      layer.enqueue(sb)
-    }
+    if layer.isReadyForMoreMediaData { layer.enqueue(sb) }
   }
 }
 
-// MARK: - Transport delegate (PiP play/pause/seek bar -> Dart -> PlPlayerController)
+// MARK: - Transport delegate
 
 @available(iOS 15.0, *)
 extension SampleBufferPiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
   func pictureInPictureController(
-    _ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool
+    _ c: AVPictureInPictureController, setPlaying playing: Bool
   ) {
     channel.invokeMethod("setPlaying", arguments: playing)
   }
 
   func pictureInPictureControllerTimeRangeForPlayback(
-    _ pictureInPictureController: AVPictureInPictureController
+    _ c: AVPictureInPictureController
   ) -> CMTimeRange {
-    if isLive {
-      // A live stream: report a "now" range so the scrubber hides.
-      return CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
-    }
+    if isLive { return CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity) }
     let start = CMTime(seconds: 0, preferredTimescale: 600)
     let dur = CMTime(seconds: max(durationSeconds, 0.001), preferredTimescale: 600)
-    _ = positionSeconds // position is reflected via invalidatePlaybackState + isPlaybackPaused
     return CMTimeRange(start: start, duration: dur)
   }
 
-  func pictureInPictureControllerIsPlaybackPaused(
-    _ pictureInPictureController: AVPictureInPictureController
-  ) -> Bool {
+  func pictureInPictureControllerIsPlaybackPaused(_ c: AVPictureInPictureController) -> Bool {
     return !isPlaying
   }
 
   func pictureInPictureController(
-    _ pictureInPictureController: AVPictureInPictureController,
-    didTransitionToRenderSize newRenderSize: CMVideoDimensions
+    _ c: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions
   ) {}
 
   func pictureInPictureController(
-    _ pictureInPictureController: AVPictureInPictureController,
-    skipByInterval skipInterval: CMTime, completion completionHandler: @escaping () -> Void
+    _ c: AVPictureInPictureController, skipByInterval skipInterval: CMTime,
+    completion completionHandler: @escaping () -> Void
   ) {
     channel.invokeMethod("skip", arguments: skipInterval.seconds)
     completionHandler()
   }
 }
 
-// MARK: - PiP window lifecycle (tell Dart so it can hide controls / keep playing)
+// MARK: - PiP window lifecycle
 
 @available(iOS 15.0, *)
 extension SampleBufferPiPController: AVPictureInPictureControllerDelegate {
-  func pictureInPictureControllerWillStartPictureInPicture(
-    _ pictureInPictureController: AVPictureInPictureController
-  ) {
+  func pictureInPictureControllerWillStartPictureInPicture(_ c: AVPictureInPictureController) {
+    log("WILL start")
     channel.invokeMethod("pipWillStart", arguments: nil)
   }
 
-  func pictureInPictureControllerDidStopPictureInPicture(
-    _ pictureInPictureController: AVPictureInPictureController
-  ) {
+  func pictureInPictureControllerDidStartPictureInPicture(_ c: AVPictureInPictureController) {
+    log("DID start")
+  }
+
+  func pictureInPictureControllerDidStopPictureInPicture(_ c: AVPictureInPictureController) {
+    log("DID stop")
     channel.invokeMethod("pipDidStop", arguments: nil)
-    // Stop feeding frames when not in PiP to save power. Re-enabled on next start/setup.
     setTap(enabled: false)
   }
 
   func pictureInPictureController(
-    _ pictureInPictureController: AVPictureInPictureController,
-    failedToStartPictureInPictureWithError error: Error
+    _ c: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error
   ) {
+    log("FAILED to start: \(error.localizedDescription)")
     channel.invokeMethod("pipError", arguments: error.localizedDescription)
   }
 }
 
-// A UIView whose backing layer is an AVSampleBufferDisplayLayer.
 @available(iOS 15.0, *)
 final class SampleBufferDisplayView: UIView {
   override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }

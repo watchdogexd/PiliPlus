@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Dart bridge to the native iOS sample-buffer Picture-in-Picture controller
@@ -74,6 +75,8 @@ class IosPip {
 
   Future<dynamic> _handle(MethodCall call) async {
     switch (call.method) {
+      case 'log':
+        debugPrint('[PiP-native] ${call.arguments}');
       case 'setPlaying':
         onSetPlaying?.call(call.arguments as bool);
       case 'skip':
