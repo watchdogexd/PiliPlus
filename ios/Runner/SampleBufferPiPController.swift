@@ -22,6 +22,7 @@ final class SampleBufferPiPController: NSObject {
   static let tapControlNotification = Notification.Name("MediaKitPiPTapControl")
   static let tapEnabledKey = "enabled"
   static let tapTextureIdKey = "textureId"
+  static let hwdecNotification = Notification.Name("MediaKitPiPHwdec")  // fork -> app, diagnostic
 
   private let channel: FlutterMethodChannel
   private var viewAttached = false
@@ -54,6 +55,8 @@ final class SampleBufferPiPController: NSObject {
     NotificationCenter.default.addObserver(
       self, selector: #selector(onDidBecomeActive),
       name: UIApplication.didBecomeActiveNotification, object: nil)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(onHwdec(_:)), name: Self.hwdecNotification, object: nil)
 
     log("init; PiP supported=\(AVPictureInPictureController.isPictureInPictureSupported())")
   }
@@ -76,6 +79,13 @@ final class SampleBufferPiPController: NSObject {
     if pipController?.isPictureInPictureActive != true {
       setTap(enabled: false)
     }
+  }
+
+  // Diagnostic: mpv's hwdec-current, read by the fork when the PiP tap turns on.
+  // "videotoolbox" = hardware decode still active during PiP; "no"/sw = software fallback.
+  @objc private func onHwdec(_ note: Notification) {
+    let value = (note.userInfo?["value"] as? String) ?? "?"
+    log("hwdec-current at PiP tap: \(value)")
   }
 
   // MARK: - MethodChannel
