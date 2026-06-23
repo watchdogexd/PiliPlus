@@ -164,7 +164,9 @@ class _LiveHeaderControlState extends State<LiveHeaderControl>
               ),
               onTap: widget.onSendDanmaku,
             ),
-          if (Platform.isAndroid || (PlatformUtils.isDesktop && !isFullScreen))
+          if (Platform.isAndroid ||
+              Platform.isIOS ||
+              (PlatformUtils.isDesktop && !isFullScreen))
             ComBtn(
               height: 30,
               tooltip: '画中画',
@@ -173,7 +175,7 @@ class _LiveHeaderControlState extends State<LiveHeaderControl>
                   plPlayerController.toggleDesktopPip();
                   return;
                 }
-                if (AndroidHelper.isPipAvailable) {
+                if (Platform.isIOS || AndroidHelper.isPipAvailable) {
                   plPlayerController.enterPip();
                 }
               },

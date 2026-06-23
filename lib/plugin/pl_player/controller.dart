@@ -25,6 +25,7 @@ import 'package:PiliPlus/plugin/pl_player/models/data_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/double_tap_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/duration.dart';
 import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
+import 'package:PiliPlus/plugin/pl_player/utils/ios_pip.dart';
 import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
@@ -293,16 +294,24 @@ class PlPlayerController with BlockConfigMixin {
   }
 
   void enterPip({bool autoEnter = false}) {
-    if (videoPlayerController != null) {
-      final state = videoPlayerController!.state;
-      PageUtils.enterPip(
-        autoEnter: autoEnter,
-        width: state.width == 0 ? width : state.width,
-        height: state.height == 0 ? height : state.height,
-        isLive: isLive,
-        isPlaying: playerStatus.isPlaying,
-      );
+    if (videoPlayerController == null) {
+      return;
     }
+    if (Platform.isIOS) {
+      // iOS auto-enters on background natively; this handles the explicit PiP button.
+      if (!autoEnter) {
+        IosPip.instance.start();
+      }
+      return;
+    }
+    final state = videoPlayerController!.state;
+    PageUtils.enterPip(
+      autoEnter: autoEnter,
+      width: state.width == 0 ? width : state.width,
+      height: state.height == 0 ? height : state.height,
+      isLive: isLive,
+      isPlaying: playerStatus.isPlaying,
+    );
   }
 
   void _disableAutoEnterPip() {
@@ -452,7 +461,57 @@ class PlPlayerController with BlockConfigMixin {
     int newSecond = position.inSeconds;
     if (positionSeconds.value != newSecond) {
       positionSeconds.value = newSecond;
+      _pushIosPipState();
     }
+  }
+
+  /// Keep the native iOS PiP transport bar in sync (no-op off iOS / unsupported).
+  void _pushIosPipState() {
+    if (!Platform.isIOS || !IosPip.instance.isSupported) return;
+    IosPip.instance.updateState(
+      isPlaying: playerStatus.isPlaying,
+      position: position.inMilliseconds / 1000.0,
+      duration: duration.value.inMilliseconds / 1000.0,
+    );
+  }
+
+  /// Attach the native sample-buffer PiP controller to this player's texture.
+  void _setupIosPip() {
+    if (!Platform.isIOS) return;
+    final vc = _videoController;
+    if (vc == null) return;
+    IosPip.instance.onSetPlaying = (playing) {
+      if (playing) {
+        play();
+      } else {
+        pause();
+      }
+    };
+    IosPip.instance.onSkip = (sec) {
+      seekTo(position + Duration(milliseconds: (sec * 1000).round()));
+    };
+    IosPip.instance.ensureSupported().then((ok) {
+      if (!ok || _videoController != vc) return;
+      late final VoidCallback idListener;
+      void doSetup(int id) {
+        IosPip.instance.setup(textureId: id, isLive: isLive);
+        _pushIosPipState();
+      }
+
+      idListener = () {
+        final id = vc.id.value;
+        if (id != null) {
+          doSetup(id);
+          vc.id.removeListener(idListener);
+        }
+      };
+      final id = vc.id.value;
+      if (id != null) {
+        doSetup(id);
+      } else {
+        vc.id.addListener(idListener);
+      }
+    });
   }
 
   void updateBufferedSecond() {
@@ -826,6 +885,8 @@ class PlPlayerController with BlockConfigMixin {
     );
 
     player.setMediaHeader(userAgent: BrowserUa.pc, referer: HttpString.baseUrl);
+
+    _setupIosPip();
 
     _startListeners(player);
 
