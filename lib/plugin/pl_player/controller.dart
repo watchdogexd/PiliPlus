@@ -299,6 +299,9 @@ class PlPlayerController with BlockConfigMixin {
     }
     if (Platform.isIOS) {
       // iOS auto-enters on background natively; this handles the explicit PiP button.
+      debugPrint(
+        '[PiP] enterPip(iOS) autoEnter=$autoEnter supported=${IosPip.instance.isSupported}',
+      );
       if (!autoEnter) {
         IosPip.instance.start();
       }
@@ -510,10 +513,13 @@ class PlPlayerController with BlockConfigMixin {
         player.setVideoTrack(VideoTrack.no());
       }
     };
+    debugPrint('[PiP] _setupIosPip running; awaiting ensureSupported');
     IosPip.instance.ensureSupported().then((ok) {
+      debugPrint('[PiP] ensureSupported -> $ok (stale=${_videoController != vc})');
       if (!ok || _videoController != vc) return;
       late final VoidCallback idListener;
       void doSetup(int id) {
+        debugPrint('[PiP] setup texture=$id isLive=$isLive');
         IosPip.instance.setup(textureId: id, isLive: isLive);
         _pushIosPipState();
       }

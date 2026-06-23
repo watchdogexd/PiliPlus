@@ -33,7 +33,9 @@ class IosPip {
       _channel.setMethodCallHandler(_handle);
       try {
         _supported = await _channel.invokeMethod<bool>('isSupported') ?? false;
-      } catch (_) {
+        debugPrint('[PiP] isSupported channel returned: $_supported');
+      } catch (e) {
+        debugPrint('[PiP] isSupported channel ERROR (native channel not set up?): $e');
         _supported = false;
       }
       _inited = true;
@@ -67,10 +69,15 @@ class IosPip {
   }
 
   Future<void> _invoke(String method, [Map<String, dynamic>? args]) async {
-    if (!_supported) return;
+    if (!_supported) {
+      debugPrint('[PiP] skip "$method": PiP not supported / channel down');
+      return;
+    }
     try {
       await _channel.invokeMethod(method, args);
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[PiP] invoke "$method" ERROR: $e');
+    }
   }
 
   Future<dynamic> _handle(MethodCall call) async {
