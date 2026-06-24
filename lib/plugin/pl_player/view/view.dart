@@ -2071,23 +2071,28 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                 // The video stays mounted at all times so its Flutter texture is never
                 // detached. Tearing it down for PiP and re-attaching on return caused a
                 // hitch; instead we just cover it (below) while the PiP float is showing.
-                Obx(
-                  () {
-                    final videoFit = plPlayerController.videoFit.value;
-                    return Transform.flip(
-                      flipX: plPlayerController.flipX.value,
-                      flipY: plPlayerController.flipY.value,
-                      child: FittedBox(
-                        fit: videoFit.boxFit,
-                        alignment: widget.alignment,
-                        child: SimpleVideo(
-                          controller: plPlayerController.videoController!,
-                          fill: widget.fill,
-                          aspectRatio: videoFit.aspectRatio,
+                // Positioned.fill gives the FittedBox the full-size tight constraints it had
+                // before this was a Stack — without it, StackFit.loose lets the FittedBox
+                // shrink to its scaled child, so vertical videos stop filling the width.
+                Positioned.fill(
+                  child: Obx(
+                    () {
+                      final videoFit = plPlayerController.videoFit.value;
+                      return Transform.flip(
+                        flipX: plPlayerController.flipX.value,
+                        flipY: plPlayerController.flipY.value,
+                        child: FittedBox(
+                          fit: videoFit.boxFit,
+                          alignment: widget.alignment,
+                          child: SimpleVideo(
+                            controller: plPlayerController.videoController!,
+                            fill: widget.fill,
+                            aspectRatio: videoFit.aspectRatio,
+                          ),
                         ),
-                      ),
-                    );
-                  },
+                      );
+                    },
+                  ),
                 ),
                 // While iOS PiP shows the video, cover the inline copy so two videos
                 // aren't visibly playing at once (mpv keeps decoding to feed the float).
