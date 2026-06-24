@@ -172,9 +172,9 @@ class PlPlayerController with BlockConfigMixin {
   StreamSubscription<Duration>? _subForSeek;
 
   // Dev-only: poll native process metrics (CPU%, memory, thermal) into the flutter logs while a
-  // video is set up. Flip to false (or strip with the rest of the [PiP] debug logging) to disable.
-  // iOS has no public GPU-utilisation API; read GPU% from Xcode's GPU gauge / Instruments instead.
-  static const bool _perfMonitor = true;
+  // video is set up. Off by default; flip to true to profile playback/PiP. iOS has no public
+  // GPU-utilisation API; read GPU% from Xcode's GPU gauge / Instruments instead.
+  static const bool _perfMonitor = false;
   Timer? _perfTimer;
 
   Box setting = GStorage.setting;
@@ -995,7 +995,10 @@ class PlPlayerController with BlockConfigMixin {
 
     player.setMediaHeader(userAgent: BrowserUa.pc, referer: HttpString.baseUrl);
 
-    _setupIosPip();
+    // iOS PiP shares the Android "后台画中画" (autoPiP) setting. When off, skip setup entirely:
+    // no native controller, warm pump, or frame tap -> zero PiP cost. Read once at player
+    // creation, so toggling the setting takes effect on the next playback (same as Android).
+    if (autoPiP) _setupIosPip();
 
     _startListeners(player);
 

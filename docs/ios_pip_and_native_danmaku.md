@@ -1,127 +1,135 @@
 # iOS PiP (mpv → AVSampleBufferDisplayLayer) + Native Danmaku
 
-This documents the iOS Picture-in-Picture implementation added on `fix/ios-experiment`, and a
-design for native danmaku. **None of this is compile-tested** (built on Linux); treat the native
-Swift as a first cut to iterate on with Xcode + a real device. Tuning points are marked `TUNE:`.
+This documents the iOS Picture-in-Picture implementation on `test/ios-pip` (verified on a real
+device, iOS 15+), and a design for native danmaku (not yet built). The PiP section reflects the
+**shipped** behavior, including the non-obvious gotchas found while debugging on-device.
 
 ## Why this shape
 
 media_kit/mpv renders into a **Flutter texture** (a `CVPixelBuffer`), so there is no
 `AVPlayerLayer` for iOS system PiP to grab. The only route for a custom (non-AVPlayer) engine is
-`AVSampleBufferDisplayLayer` + `AVPictureInPictureControllerContentSource` (iOS 15+). This is the
-same constraint Bilibili's own player (ijkplayer — FFmpeg + VideoToolbox, custom-rendered) faces,
-so this mirrors how the official app must do it. We **keep mpv** for all decode/streaming/DASH —
-no AVPlayer, no DASH proxy, no header hacks, no feature loss.
+`AVSampleBufferDisplayLayer` (SBDL) + `AVPictureInPictureControllerContentSource` (iOS 15+). This is
+the same constraint Bilibili's own player (ijkplayer — FFmpeg + VideoToolbox, custom-rendered)
+faces. We **keep mpv** for all decode/streaming/DASH — no AVPlayer, no DASH proxy, no feature loss.
 
-Per frame: the patched `VideoOutput` grabs the just-rendered `CVPixelBuffer` and posts it; the app
-wraps it in a `CMSampleBuffer` and enqueues into the display layer; PiP transport (play/pause/seek)
-is forwarded back to `PlPlayerController`.
+Per frame (only while PiP is active or about to be): the patched `VideoOutput` grabs the
+just-rendered `CVPixelBuffer` and posts it via `NotificationCenter`; the app wraps it in a
+`CMSampleBuffer` and enqueues it into the SBDL; PiP transport (play/pause/seek) is forwarded back to
+`PlPlayerController`.
 
-## Files already changed in this repo
+## Files in this repo
 
-- `ios/Runner/SampleBufferPiPController.swift` — **new**. PiP controller, sample-buffer plumbing,
-  `AVPictureInPictureSampleBufferPlaybackDelegate`, lifecycle delegate, the SBDL-backed view.
+- `ios/Runner/SampleBufferPiPController.swift` — PiP controller, sample-buffer plumbing,
+  `AVPictureInPictureSampleBufferPlaybackDelegate`, lifecycle delegate, the SBDL-backed view,
+  primer pump, lock/unlock handling, and a dev `PerfMonitor` (CPU/mem/thermal).
 - `ios/Runner/AppDelegate.swift` — registers the `com.piliplus/ios_pip` MethodChannel, configures
   `AVAudioSession(.playback)`, owns the PiP controller.
-- `lib/plugin/pl_player/utils/ios_pip.dart` — **new**. Dart bridge + transport callbacks.
-- `lib/plugin/pl_player/controller.dart` — `_setupIosPip()` (attaches PiP to the texture once the
-  `VideoController.id` is known), `_pushIosPipState()` (keeps the transport bar in sync, called
-  from `updatePositionSecond`), and `enterPip()` now branches to iOS.
-- `lib/pages/video/widgets/header_control.dart`, `lib/pages/live_room/widgets/header_control.dart`
-  — PiP button now shows + works on iOS.
+- `lib/plugin/pl_player/utils/ios_pip.dart` — Dart bridge + transport / lock callbacks.
+- `lib/plugin/pl_player/controller.dart` — `_setupIosPip()` (gated on the `autoPiP` setting),
+  `_pushIosPipState()` (transport sync; also pushed on every play/pause flip), lock/unlock track
+  handling, and the resume-reload guard.
+- `lib/pages/setting/models/play_settings.dart` — the **后台画中画 (`autoPiP`)** toggle now shows on
+  iOS too (was Android-only) and controls iOS PiP.
+- `docs/fork_VideoOutput.swift` — the media_kit fork patch (see below).
+
+## Settings toggle (shared with Android)
+
+iOS PiP reuses the existing Android **后台画中画 / `SettingBoxKey.autoPiP`** preference (default
+**off**). When off, `_setupIosPip()` is skipped entirely — no native controller, no warm pump, no
+frame tap, zero cost. The flag is read once at player creation, so toggling it takes effect on the
+next playback (same as Android). There is intentionally **no separate iOS-only PiP setting**.
 
 ## The one external piece — patch your media_kit fork
 
-The frame tap lives in `media_kit_video`, which you vendor via the git override
-`github.com/My-Responsitories/media-kit @ version_1.2.5` (resolved into pub-cache). Apply this to
-that fork and bump the ref (or use a local `path:` override while developing).
+The frame tap lives in `media_kit_video`, vendored via the git override
+`github.com/My-Responsitories/media-kit @ version_1.2.5` (resolved into pub-cache). The full
+patched file is committed at **`docs/fork_VideoOutput.swift`**; copy it over the pub-cache copy
+**on the Mac that builds** (not the Linux dev box — that pub-cache is unrelated to the iOS build):
 
-**File:** `media_kit_video/common/darwin/Classes/plugin/VideoOutput.swift`
-
-1. Add a tiny tap registry (top-level in the file, iOS only):
-
-```swift
-#if os(iOS)
-// Tracks which texture (if any) is currently feeding iOS PiP. App toggles this via notification.
-final class MediaKitPiPTap {
-  static let shared = MediaKitPiPTap()
-  private var enabledTextureId: Int64 = -1
-  private init() {
-    NotificationCenter.default.addObserver(
-      forName: Notification.Name("MediaKitPiPTapControl"), object: nil, queue: nil
-    ) { [weak self] note in
-      guard let self = self, let info = note.userInfo else { return }
-      let enabled = (info["enabled"] as? Bool) ?? false
-      let tid = (info["textureId"] as? NSNumber)?.int64Value ?? -1
-      self.enabledTextureId = enabled ? tid : -1
-    }
-  }
-  func isEnabled(_ id: Int64) -> Bool { id != -1 && id == enabledTextureId }
-}
-#endif
+```bash
+F=$(ls ~/.pub-cache/git/media-kit-*/media_kit_video/common/darwin/Classes/plugin/VideoOutput.swift | head -1)
+cp docs/fork_VideoOutput.swift "$F"
 ```
 
-2. In `_updateCallback()`, right after `texture.render(size)` (before the
-   `registry.textureFrameAvailable` block), forward the frame when the tap is on:
-
-```swift
-    texture.render(size)
-
-    #if os(iOS)
-    // PiP tap: hand the freshly rendered frame to the app only while PiP consumes this texture.
-    if MediaKitPiPTap.shared.isEnabled(textureId),
-       let pb = texture.copyPixelBuffer()?.takeRetainedValue() {
-      NotificationCenter.default.post(
-        name: Notification.Name("MediaKitPiPFrame"), object: nil,
-        userInfo: ["textureId": NSNumber(value: textureId), "pixelBuffer": pb])
-    }
-    #endif
-
-    DispatchQueue.main.sync { [weak self] in
-      guard let that = self else { return }
-      that.registry.textureFrameAvailable(that.textureId)
-    }
-```
-
-`copyPixelBuffer()` already exists on `TextureHW`/`TextureSW` (the `FlutterTexture` API). If the
-compiler complains that `ResizableTextureProtocol` doesn't expose it, add
-`func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>?` to that protocol (both texture classes already
-implement it).
-
-> `TUNE:` the tap reads `textureContexts.current` from the worker thread while Flutter reads it on
-> its raster thread. Triple-buffering makes this usually safe; if you see tearing in PiP, post the
-> notification from inside the existing `DispatchQueue.main.sync` block instead.
+The patch adds `MediaKitPiPTap` (a notification-driven tap registry with a warm-burst + ~2fps
+trickle gate) and, in `_updateCallback`, an iOS-only block that — when the tap is enabled — probes
+`hwdec-current` (~2s) and posts the rendered `CVPixelBuffer`. **Transfer it via git, never by paste**
+(newlines must stay intact). Re-copy only when this file changes; pure Runner/Dart changes don't
+need it.
 
 ## Build / wiring checklist (Xcode, on your Mac)
 
-1. Add `SampleBufferPiPController.swift` to the **Runner** target (Xcode usually auto-adds files in
-   `ios/Runner/`; confirm it's in *Build Phases → Compile Sources*).
-2. `Info.plist` already has `UIBackgroundModes → audio` — that's the only key PiP needs here.
-3. Deployment target is **14.0**; the PiP code is `@available(iOS 15.0, *)`-gated, so iOS 14 simply
-   won't offer PiP. Bump to 15 if you'd rather not carry the guard.
-4. Apply the fork patch and `flutter pub get` (or point the override at a local path).
-5. Run on a **real device** (PiP and hardware decode don't work in the Simulator).
+1. `SampleBufferPiPController.swift` must be in the **Runner** target's *Compile Sources*. New
+   standalone `.swift` files are **not** auto-added — that's why `PerfMonitor` lives inside
+   `SampleBufferPiPController.swift` rather than its own file (a separate file failed to compile
+   with "Cannot find PerfMonitor in scope").
+2. `Info.plist` already has `UIBackgroundModes → audio` — the only key PiP needs.
+3. PiP code is `@available(iOS 15.0, *)`-gated; iOS 14 simply won't offer PiP.
+4. Run on a **real device** (PiP + hardware decode don't work in the Simulator).
 
-## Known gotchas to verify on-device (`TUNE:`)
+## How it actually works (confirmed on-device)
 
-- **Source layer visibility.** The SBDL view is inserted *behind* the Flutter view. PiP needs the
-  layer in a window with content; occluded-but-present is usually fine, but if
-  `isPictureInPicturePossible` stays false, give the SBDL a small visible region or bring it
-  forward over the video area.
-- **VOD scrubber.** `timeRangeForPlayback` reports `0..duration`; we call `invalidatePlaybackState`
-  on each `updateState`. If the scrubber drifts, push position more often than 1 Hz while in PiP.
-- **Auto-enter.** `canStartPictureInPictureAutomaticallyFromInline = true` makes iOS start PiP when
-  the app backgrounds on the video page. **Handled:** the frame tap is gated to background/PiP only
-  — enabled on `willResignActive` (fires before backgrounding, so auto-enter has frames) and the
-  explicit PiP button, disabled on `didBecomeActive` (foreground, not in PiP) and `pipDidStop`. So
-  no frames flow during normal foreground playback. If auto-enter still races on slow devices,
-  widen the window (enter tap slightly earlier / keep it on a beat longer).
-- **Background decode.** Commit `e36ec96` disables the video track in background to keep hwdec.
-  **Handled:** `_onAppLifecycleState` now early-returns when `_isPipActive`, and the PiP
-  start/stop callbacks keep the video track on during PiP (and drop it again if PiP closes while
-  still backgrounded). Verify the ordering holds on-device (PiP "will start" vs the lifecycle event).
-- **Danmaku in PiP.** System PiP shows only the SBDL contents, so danmaku won't appear — matches the
-  official app. To burn danmaku in, composite it onto the pixel buffer before enqueuing (extra GPU).
+These are the load-bearing details — each was a real bug before it was understood.
+
+- **Eligibility = primer + warm pump.** `isPictureInPicturePossible` must be true *at the instant
+  the app backgrounds* for auto-PiP to fire. The fork **does not post frames while the app is in
+  the foreground** (Flutter's compositor owns the texture's `CVPixelBuffer`, so `copyPixelBuffer()`
+  only yields a frame once the app resigns active). So the SBDL would otherwise sit empty/with one
+  stale frame and lose eligibility. Fix: `enqueuePrimerFrame()` seeds a black 320×180 frame at
+  setup, and `startWarmPump()` re-enqueues one **~1/s while inline** to keep eligibility *latched*.
+  The pump pauses during PiP (real frames take over) and stops on dispose.
+
+- **Auto-PiP needs the video to look PLAYING — via the timebase rate.** iOS will not auto-start PiP
+  for a video it considers paused, and for an SBDL it reads "paused vs playing" from the layer's
+  `controlTimebase` **rate**. Our native `isPlaying` could be stale (`updateState` only fired on
+  position ticks). So at `willResignActive` we **force the timebase to rate=1 *iff* `isPlaying`**.
+  `isPlaying` is now pushed to native **on every play/pause flip** (the `stream.playing` listener),
+  not just on position ticks, so a real pause reads false promptly. Net effect:
+  - playing → background → rate=1 → auto-PiP fires (reliable);
+  - genuinely paused → background → rate stays 0 → **no** auto-PiP (otherwise PiP would start on the
+    black primer = a black landscape window, since a paused mpv emits no frames).
+
+- **Frame tap is gated; foreground is silent and cheap.** Tap is warm (~2fps trickle) while inline,
+  full rate only while PiP is on screen (`willStart`→full, `pipDidStop`/`didBecomeActive`→trickle).
+  Cost inline is ~2 IOSurface retains/sec (~0% CPU). High-frequency diagnostics (pace, hwdec probe,
+  frame-gap) are gated behind `verboseLog` (false) in the Swift controller.
+
+- **Return from PiP — no decoder rebuild.** The resume lifecycle handler only calls
+  `setVideoTrack(auto)` if the track was actually dropped; re-selecting an already-active track
+  forces mpv to rebuild the whole decode chain (a visible hitch). Guarded in `_onAppLifecycleState`.
+
+- **Lock screen → audio only, hwdec recovers on unlock.** When the device locks, iOS reclaims
+  VideoToolbox from in-process apps → mpv would fall back to multi-second software decode for a
+  window that isn't even shown on the lock screen. Detected two ways (`protectedDataWillBecomeUnavailable`
+  and a hardware→software `hwdec-current` transition); we drop the video track (`setVideoTrack(no)`,
+  audio continues) and tap off. On unlock we restore the track to re-acquire VideoToolbox (~4s
+  decode-chain rebuild — the unavoidable cost of not running software decode while locked).
+
+- **No black float when there's no video.** `dispose()` sets
+  `canStartPictureInPictureAutomaticallyFromInline = false` (and `setup()` re-arms it) so
+  backgrounding from a video-less screen can't auto-start PiP against the empty/primer layer.
+
+- **`-11847 "Operation Interrupted"` recovery.** A lock/interruption can fail the SBDL; on a failed
+  status we `flush()` **and reset the format description** so the next frame rebuilds cleanly
+  (reusing a pre-interruption format description can re-fail the layer).
+
+- **Vertical videos fill width.** The video `Obx` in `view.dart` is wrapped in `Positioned.fill`;
+  without it the default `StackFit.loose` let `FittedBox` shrink the layer.
+
+- **Source layer geometry.** The SBDL view is a 1×1 view inserted *behind* the Flutter view (z=0).
+  A full-size layer doubled the video / left a stuck frame; PiP pulls full-resolution frames from
+  the layer's buffer queue regardless of on-screen size, so 1×1 is fine.
+
+- **Danmaku in PiP.** System PiP shows only SBDL contents, so danmaku doesn't appear (matches the
+  official app). `pipNoDanmaku` is therefore Android-only. Burning danmaku in would mean
+  compositing onto the pixel buffer before enqueuing (extra GPU) — see the design below.
+
+## Debug toggles
+
+- **Swift** `verboseLog` (in `SampleBufferPiPController`) — set `true` for per-2s pace / hwdec /
+  frame-gap diagnostics. Off by default; low-frequency lifecycle/error logs stay on.
+- **Dart** `PlPlayerController._perfMonitor` — set `true` to log `[Perf] cpu/mem/thermal` every 2s
+  while playing (iOS has no public GPU-utilisation API; use Xcode's GPU gauge / Instruments).
 
 ---
 

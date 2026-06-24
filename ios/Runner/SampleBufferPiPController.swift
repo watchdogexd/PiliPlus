@@ -64,7 +64,11 @@ final class SampleBufferPiPController: NSObject {
   // Re-primes the display layer ~1/s while inline so isPictureInPicturePossible stays latched true
   // and the first background after opening a video reliably auto-PiPs (see startWarmPump).
   private var warmPumpTimer: Timer?
-  private var lastPossible = false  // diagnostic: track isPictureInPicturePossible transitions
+
+  // Flip to true to surface the high-frequency diagnostics (per-2s frame pacing, hwdec-current
+  // probe, frame-gap warnings). Off by default so normal runs only log low-frequency lifecycle
+  // events (setup / PiP start-stop / lock-unlock / errors).
+  private let verboseLog = false
 
   private var isPlaying = false
   private var isLive = false
@@ -110,17 +114,7 @@ final class SampleBufferPiPController: NSObject {
     // Only arm the tap when a video is actually set up. After dispose (left the player)
     // activeTextureId is -1; arming here would feed/keep the layer warm for nothing.
     if let c = pipController, activeTextureId != -1 {
-      // DIAGNOSTIC: auto-PiP from inline only fires if isPictureInPicturePossible is true at THIS
-      // instant. Log the gate so we can see whether the first-background miss is "possible=false"
-      // (eligibility race) or possible=true-but-still-no-start (a different cause).
-      // tbrate is the layer's controlTimebase rate: if it's 0 at background time, iOS sees a
-      // PAUSED video and declines auto-PiP even with possible=true. isPlaying is our own state.
-      let tbrate = timebase != nil ? CMTimebaseGetRate(timebase!) : -1
-      log("willResignActive -> enable tap | possible=\(c.isPictureInPicturePossible) "
-        + "autoInline=\(c.canStartPictureInPictureAutomaticallyFromInline) "
-        + "active=\(c.isPictureInPictureActive) frames=\(frameCount) "
-        + "layerStatus=\(sampleBufferView.displayLayer.status.rawValue) "
-        + "tbrate=\(tbrate) isPlaying=\(isPlaying)")
+      log("willResignActive -> enable tap (possible=\(c.isPictureInPicturePossible) isPlaying=\(isPlaying))")
       // iOS won't auto-PiP a video it thinks is PAUSED (it reads that from the layer's
       // controlTimebase rate). A prior updateState can leave the rate stale at 0 even while
       // playing, so when we ARE playing, re-assert rate=1 here to guarantee auto-PiP fires.
@@ -155,9 +149,9 @@ final class SampleBufferPiPController: NSObject {
   // drop to audio-only so we don't keep burning CPU on software decode for a hidden window.
   @objc private func onHwdec(_ note: Notification) {
     let value = (note.userInfo?["value"] as? String) ?? "?"
-    // Only log while PiP is on screen (full rate). During the foreground warm trickle this fires
-    // every 2s and is pure noise — but the lock-detection logic below must still run.
-    if tapFullRate { log("hwdec-current at PiP tap: \(value)") }
+    // Diagnostic only (gated): logs while PiP is on screen. The lock-detection logic below must
+    // still run regardless.
+    if verboseLog, tapFullRate { log("hwdec-current at PiP tap: \(value)") }
     if value.hasPrefix("videotoolbox") {
       sawHardware = true
     } else if sawHardware, value != "?", pipController?.isPictureInPictureActive == true {
@@ -446,14 +440,6 @@ final class SampleBufferPiPController: NSObject {
       guard let self = self, let c = self.pipController, self.activeTextureId != -1,
             c.isPictureInPictureActive != true else { return }
       self.enqueuePrimerFrame(verbose: false)
-      // DIAGNOSTIC: log only when possibility flips, so we can see whether re-priming with black
-      // frames is enough to make iOS report the layer PiP-eligible while inline (the thing the
-      // first-background auto-PiP depends on).
-      let p = c.isPictureInPicturePossible
-      if p != self.lastPossible {
-        self.lastPossible = p
-        self.log("warm pump: isPictureInPicturePossible -> \(p) (frames=\(self.frameCount))")
-      }
     }
   }
 
@@ -514,8 +500,8 @@ final class SampleBufferPiPController: NSObject {
       if gap > paceMaxGap { paceMaxGap = gap }
       // A gap is only a stall when we *asked* for every frame (PiP on screen). The ~2 fps warm
       // trickle has ~0.5s gaps by design — gating on the requested tap rate (not the playback
-      // timebase) keeps those out of the log so a real stall stands out.
-      if gap > 0.4 && tapFullRate {
+      // timebase) keeps those out of the log so a real stall stands out. Diagnostic only (gated).
+      if verboseLog, gap > 0.4, tapFullRate {
         log(String(format: "frame GAP %.3fs status=%d skips=%d", gap, layer.status.rawValue, enqueueSkips))
       }
     }
@@ -527,10 +513,9 @@ final class SampleBufferPiPController: NSObject {
       let fps = Double(paceFrames) / elapsed
       // maxgap reveals frame-to-frame judder that the fps average hides: at a smooth 30fps it
       // should be ~0.033s. A maxgap far above 1/fps while fps looks fine == visible stutter.
-      // Only log while PiP is on screen (full rate); the foreground warm trickle would otherwise
-      // spam a ~2fps line every 2s. tap=full + low fps + skips=0 == the decoder is slow (e.g. a
+      // Diagnostic only (gated). tap=full + low fps + skips=0 == the decoder is slow (e.g. a
       // post-unlock rebuild), not the tap throttling us.
-      if tapFullRate {
+      if verboseLog, tapFullRate {
         log(String(format: "pace %.1ffps maxgap=%.3fs skips=%d ready=%@ status=%d tap=full err=%@",
                    fps, paceMaxGap, enqueueSkips,
                    layer.isReadyForMoreMediaData ? "Y" : "N",

@@ -211,10 +211,13 @@ List<SettingsModel> get playSettings => [
       setKey: SettingBoxKey.continuePlayInBackground,
       defaultVal: false,
     ),
-  if (Platform.isAndroid) ...[
+  // 后台画中画：Android 进入后台时由系统切到 PiP 小窗；iOS 由原生 AVSampleBufferDisplayLayer
+  // 桥接实现同样的自动小窗（见 docs/ios_pip_and_native_danmaku.md）。两端共用此开关。
+  if (PlatformUtils.isMobile)
     SwitchModel(
       title: '后台画中画',
-      subtitle: '进入后台时以小窗形式（PiP）播放',
+      subtitle: '进入后台时以小窗形式（PiP）播放'
+          '${Platform.isIOS ? '（更改后重新播放生效）' : ''}',
       leading: const Icon(Icons.picture_in_picture_outlined),
       setKey: SettingBoxKey.autoPiP,
       defaultVal: false,
@@ -224,6 +227,8 @@ List<SettingsModel> get playSettings => [
         }
       },
     ),
+  // iOS PiP 暂未实现原生弹幕渲染，此项仅 Android 有效。
+  if (Platform.isAndroid)
     const SwitchModel(
       title: '画中画不加载弹幕',
       subtitle: '当弹幕开关开启时，小窗屏蔽弹幕以获得较好的体验',
@@ -231,7 +236,6 @@ List<SettingsModel> get playSettings => [
       setKey: SettingBoxKey.pipNoDanmaku,
       defaultVal: false,
     ),
-  ],
   const SwitchModel(
     title: '全屏手势反向',
     subtitle: '默认播放器中部向上滑动进入全屏，向下退出\n开启后向下全屏，向上退出',

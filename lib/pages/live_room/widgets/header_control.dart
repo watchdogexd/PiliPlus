@@ -165,7 +165,7 @@ class _LiveHeaderControlState extends State<LiveHeaderControl>
               onTap: widget.onSendDanmaku,
             ),
           if (Platform.isAndroid ||
-              Platform.isIOS ||
+              (Platform.isIOS && plPlayerController.autoPiP) ||
               (PlatformUtils.isDesktop && !isFullScreen))
             ComBtn(
               height: 30,
