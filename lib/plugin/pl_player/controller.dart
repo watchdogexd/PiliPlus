@@ -1157,6 +1157,10 @@ class PlPlayerController with BlockConfigMixin {
           _disableAutoEnterPip();
           playerStatus.value = PlayerStatus.paused;
         }
+        // Push the new play state to native PiP immediately. Otherwise native isPlaying only
+        // updates on position/buffer ticks, which stop when paused -> it goes stale and iOS
+        // would auto-PiP a paused video (black primer-only window).
+        _pushIosPipState();
         videoPlayerServiceHandler?.onStatusChange(
           playerStatus.value,
           isBuffering.value,
