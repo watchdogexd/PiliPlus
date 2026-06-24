@@ -113,10 +113,14 @@ final class SampleBufferPiPController: NSObject {
       // DIAGNOSTIC: auto-PiP from inline only fires if isPictureInPicturePossible is true at THIS
       // instant. Log the gate so we can see whether the first-background miss is "possible=false"
       // (eligibility race) or possible=true-but-still-no-start (a different cause).
+      // tbrate is the layer's controlTimebase rate: if it's 0 at background time, iOS sees a
+      // PAUSED video and declines auto-PiP even with possible=true. isPlaying is our own state.
+      let tbrate = timebase != nil ? CMTimebaseGetRate(timebase!) : -1
       log("willResignActive -> enable tap | possible=\(c.isPictureInPicturePossible) "
         + "autoInline=\(c.canStartPictureInPictureAutomaticallyFromInline) "
         + "active=\(c.isPictureInPictureActive) frames=\(frameCount) "
-        + "layerStatus=\(sampleBufferView.displayLayer.status.rawValue)")
+        + "layerStatus=\(sampleBufferView.displayLayer.status.rawValue) "
+        + "tbrate=\(tbrate) isPlaying=\(isPlaying)")
       setTap(enabled: true)
     }
   }
