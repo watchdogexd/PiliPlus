@@ -97,7 +97,9 @@ final class SampleBufferPiPController: NSObject {
   }
 
   @objc private func onWillResignActive() {
-    if pipController != nil {
+    // Only arm the tap when a video is actually set up. After dispose (left the player)
+    // activeTextureId is -1; arming here would feed/keep the layer warm for nothing.
+    if pipController != nil, activeTextureId != -1 {
       log("willResignActive -> enable tap")
       setTap(enabled: true)
     }
@@ -217,6 +219,9 @@ final class SampleBufferPiPController: NSObject {
       controller.delegate = self
       pipController = controller
     }
+    // Re-arm auto-PiP for this video (dispose() turns it off so backgrounding from a
+    // video-less screen can't auto-start PiP against an empty layer -> black float).
+    pipController?.canStartPictureInPictureAutomaticallyFromInline = true
     // Seed the layer NOW with one synthetic frame so isPictureInPicturePossible is true
     // immediately. The decoder's first real frame can take seconds (network load); without a
     // primer, backgrounding during that window can't auto-PiP because the layer is empty.
@@ -276,6 +281,9 @@ final class SampleBufferPiPController: NSObject {
 
   private func dispose() {
     setTap(enabled: false)
+    // Turn OFF auto-PiP: with no video, backgrounding must not auto-start PiP against the
+    // (flushed/primer-only) layer and show a black float. setup() re-arms it for the next video.
+    pipController?.canStartPictureInPictureAutomaticallyFromInline = false
     // Dismiss the float if it's up. Keep the controller (it's created once and bound to the
     // persistent layer); the next video reuses it. Nil-ing it here can abort the dismissal.
     if pipController?.isPictureInPictureActive == true {
@@ -285,7 +293,7 @@ final class SampleBufferPiPController: NSObject {
     frameCount = 0
     formatDescription = nil
     sampleBufferView.displayLayer.flushAndRemoveImage()
-    log("dispose: tap off, PiP stopped")
+    log("dispose: tap off, auto-PiP off, PiP stopped")
   }
 
   // The display layer must live in the on-screen view hierarchy for PiP to be possible.
