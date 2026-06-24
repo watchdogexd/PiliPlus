@@ -177,6 +177,13 @@ class PlPlayerController with BlockConfigMixin {
   static const bool _perfMonitor = false;
   Timer? _perfTimer;
 
+  // Verbose [PiP] tracing. Off by default (silent in all build modes, including --profile); flip
+  // to true to debug PiP. Mirrors `verboseLog` in ios/Runner/SampleBufferPiPController.swift.
+  static const bool _pipVerbose = false;
+  void _pipLog(String msg) {
+    if (_pipVerbose) debugPrint('[PiP] $msg');
+  }
+
   Box setting = GStorage.setting;
 
   // final Durations durations;
@@ -503,7 +510,7 @@ class PlPlayerController with BlockConfigMixin {
       isPipActive.value = true;
       final player = _videoPlayerController;
       if (player == null || onlyPlayAudio.value) {
-        debugPrint('[PiP] willStart: no track change '
+        _pipLog('willStart: no track change '
             '(player=${player != null} audioOnly=${onlyPlayAudio.value})');
         return;
       }
@@ -512,15 +519,15 @@ class PlPlayerController with BlockConfigMixin {
       // mpv to reload the whole decode chain — the visible hitch right as PiP starts.
       final vid = player.state.track.video;
       if (vid == VideoTrack.no()) {
-        debugPrint('[PiP] willStart: video was OFF -> setVideoTrack(auto) [RELOAD]');
+        _pipLog('willStart: video was OFF -> setVideoTrack(auto) [RELOAD]');
         player.setVideoTrack(VideoTrack.auto());
       } else {
-        debugPrint('[PiP] willStart: video already on (${vid.id}); no reload');
+        _pipLog('willStart: video already on (${vid.id}); no reload');
       }
     };
     IosPip.instance.onPipDidStop = (foreground) {
       isPipActive.value = false;
-      debugPrint('[PiP] didStop foreground=$foreground');
+      _pipLog('didStop foreground=$foreground');
       // Returning to the app: keep the decode chain intact. Tearing the video track
       // down here (and rebuilding it on resume) is what caused the lag on return.
       if (foreground) return;
@@ -528,7 +535,7 @@ class PlPlayerController with BlockConfigMixin {
       // (mirrors the background behaviour in _onAppLifecycleState).
       final player = _videoPlayerController;
       if (player == null || onlyPlayAudio.value) return;
-      debugPrint('[PiP] didStop background -> setVideoTrack(no)');
+      _pipLog('didStop background -> setVideoTrack(no)');
       player.setVideoTrack(VideoTrack.no());
     };
     IosPip.instance.onScreenLocked = () {
@@ -539,7 +546,7 @@ class PlPlayerController with BlockConfigMixin {
       final player = _videoPlayerController;
       if (player == null || onlyPlayAudio.value) return;
       if (player.state.track.video != VideoTrack.no()) {
-        debugPrint('[PiP] screen locked -> setVideoTrack(no) (audio only)');
+        _pipLog('screen locked -> setVideoTrack(no) (audio only)');
         player.setVideoTrack(VideoTrack.no());
       }
     };
@@ -548,17 +555,17 @@ class PlPlayerController with BlockConfigMixin {
       final player = _videoPlayerController;
       if (player == null || onlyPlayAudio.value) return;
       if (player.state.track.video == VideoTrack.no()) {
-        debugPrint('[PiP] screen unlocked -> setVideoTrack(auto) (re-acquire videotoolbox)');
+        _pipLog('screen unlocked -> setVideoTrack(auto) (re-acquire videotoolbox)');
         player.setVideoTrack(VideoTrack.auto());
       }
     };
-    debugPrint('[PiP] _setupIosPip running; awaiting ensureSupported');
+    _pipLog('_setupIosPip running; awaiting ensureSupported');
     IosPip.instance.ensureSupported().then((ok) {
-      debugPrint('[PiP] ensureSupported -> $ok (stale=${_videoController != vc})');
+      _pipLog('ensureSupported -> $ok (stale=${_videoController != vc})');
       if (!ok || _videoController != vc) return;
       late final VoidCallback idListener;
       void doSetup(int id) {
-        debugPrint('[PiP] setup texture=$id isLive=$isLive');
+        _pipLog('setup texture=$id isLive=$isLive');
         IosPip.instance.setup(textureId: id, isLive: isLive);
         _pushIosPipState();
         _startPerfMonitor();
@@ -672,7 +679,7 @@ class PlPlayerController with BlockConfigMixin {
   void _onAppLifecycleState(AppLifecycleState state) {
     final player = _videoPlayerController;
     if (Platform.isIOS) {
-      debugPrint('[PiP] lifecycle=$state pipActive=${isPipActive.value} '
+      _pipLog('lifecycle=$state pipActive=${isPipActive.value} '
           'video=${player?.state.track.video.id}');
     }
     if (player == null) return;
@@ -680,12 +687,10 @@ class PlPlayerController with BlockConfigMixin {
       case AppLifecycleState.hidden || AppLifecycleState.paused:
         // Keep decoding while PiP is presenting video; it needs the frames.
         if (isPipActive.value) {
-          if (Platform.isIOS) {
-            debugPrint('[PiP] background but PiP active -> keep video decoding');
-          }
+          _pipLog('background but PiP active -> keep video decoding');
           return;
         }
-        if (Platform.isIOS) debugPrint('[PiP] background -> setVideoTrack(no)');
+        if (Platform.isIOS) _pipLog('background -> setVideoTrack(no)');
         player.setVideoTrack(VideoTrack.no());
       case AppLifecycleState.resumed:
         // Only reload the decode chain if the track was actually disabled while
@@ -694,10 +699,8 @@ class PlPlayerController with BlockConfigMixin {
         // already-auto track forces a full decoder rebuild -> a visible hitch on return.
         final want = onlyPlayAudio.value ? VideoTrack.no() : VideoTrack.auto();
         final current = player.state.track.video;
-        if (Platform.isIOS) {
-          debugPrint('[PiP] resumed; current=${current.id} want=${want.id} '
-              '${current == want ? "(no reload)" : "-> setVideoTrack(${want.id})"}');
-        }
+        _pipLog('resumed; current=${current.id} want=${want.id} '
+            '${current == want ? "(no reload)" : "-> setVideoTrack(${want.id})"}');
         if (current != want) {
           player.setVideoTrack(want);
         }

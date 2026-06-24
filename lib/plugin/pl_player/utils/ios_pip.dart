@@ -16,6 +16,10 @@ class IosPip {
 
   static const MethodChannel _channel = MethodChannel('com.piliplus/ios_pip');
 
+  // Verbose tracing (incl. forwarding native [PiP-native] logs). Off by default; flip to debug PiP.
+  // Genuine errors are always logged regardless. Mirrors PlPlayerController._pipVerbose.
+  static const bool _verbose = false;
+
   bool _supported = false;
   bool get isSupported => _supported;
   bool _inited = false;
@@ -46,7 +50,7 @@ class IosPip {
       _channel.setMethodCallHandler(_handle);
       try {
         _supported = await _channel.invokeMethod<bool>('isSupported') ?? false;
-        debugPrint('[PiP] isSupported channel returned: $_supported');
+        if (_verbose) debugPrint('[PiP] isSupported channel returned: $_supported');
       } catch (e) {
         debugPrint('[PiP] isSupported channel ERROR (native channel not set up?): $e');
         _supported = false;
@@ -95,7 +99,7 @@ class IosPip {
 
   Future<void> _invoke(String method, [Map<String, dynamic>? args]) async {
     if (!_supported) {
-      debugPrint('[PiP] skip "$method": PiP not supported / channel down');
+      if (_verbose) debugPrint('[PiP] skip "$method": PiP not supported / channel down');
       return;
     }
     try {
@@ -108,7 +112,7 @@ class IosPip {
   Future<dynamic> _handle(MethodCall call) async {
     switch (call.method) {
       case 'log':
-        debugPrint('[PiP-native] ${call.arguments}');
+        if (_verbose) debugPrint('[PiP-native] ${call.arguments}');
       case 'setPlaying':
         onSetPlaying?.call(call.arguments as bool);
       case 'skip':

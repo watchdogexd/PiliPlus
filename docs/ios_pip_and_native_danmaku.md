@@ -126,10 +126,16 @@ These are the load-bearing details — each was a real bug before it was underst
 
 ## Debug toggles
 
-- **Swift** `verboseLog` (in `SampleBufferPiPController`) — set `true` for per-2s pace / hwdec /
-  frame-gap diagnostics. Off by default; low-frequency lifecycle/error logs stay on.
-- **Dart** `PlPlayerController._perfMonitor` — set `true` to log `[Perf] cpu/mem/thermal` every 2s
-  while playing (iOS has no public GPU-utilisation API; use Xcode's GPU gauge / Instruments).
+All PiP logging is **off by default** — normal/profile runs are silent. Flip a flag to debug:
+
+- **Dart** `PlPlayerController._pipVerbose` — `[PiP]` lifecycle/track-decision tracing.
+- **Dart** `IosPip._verbose` — forwards native `[PiP-native]` logs to the flutter console (genuine
+  errors are always logged regardless).
+- **Swift** `SampleBufferPiPController.verboseLog` — per-2s pace / hwdec / frame-gap diagnostics
+  (the high-frequency ones). Low-frequency native lifecycle logs always reach `NSLog` (device
+  console / Xcode); set `IosPip._verbose` too to also see them in `flutter run`.
+- **Dart** `PlPlayerController._perfMonitor` — `[Perf] cpu/mem/thermal` every 2s while playing
+  (iOS has no public GPU-utilisation API; use Xcode's GPU gauge / Instruments for GPU%).
 
 ---
 
