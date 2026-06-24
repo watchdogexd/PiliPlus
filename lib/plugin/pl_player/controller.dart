@@ -495,9 +495,12 @@ class PlPlayerController with BlockConfigMixin {
     };
     IosPip.instance.onPipWillStart = () {
       isPipActive.value = true;
-      // Ensure the video track stays on so PiP keeps receiving frames in background.
       final player = _videoPlayerController;
-      if (player != null && !onlyPlayAudio.value) {
+      if (player == null || onlyPlayAudio.value) return;
+      // Only re-enable video if it was actually dropped (e.g. the background lifecycle
+      // handler raced ahead and disabled it). Re-selecting an already-active track forces
+      // mpv to reload the whole decode chain — the visible hitch right as PiP starts.
+      if (player.state.track.video == VideoTrack.no()) {
         player.setVideoTrack(VideoTrack.auto());
       }
     };
