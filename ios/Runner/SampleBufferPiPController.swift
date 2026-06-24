@@ -61,6 +61,10 @@ final class SampleBufferPiPController: NSObject {
   // disabled HA) must NOT be mistaken for that.
   private var sawHardware = false
 
+  // Re-primes the display layer ~1/s while inline so isPictureInPicturePossible stays latched true
+  // and the first background after opening a video reliably auto-PiPs (see startWarmPump).
+  private var warmPumpTimer: Timer?
+
   private var isPlaying = false
   private var isLive = false
   private var positionSeconds: Double = 0
@@ -121,6 +125,7 @@ final class SampleBufferPiPController: NSObject {
       // Back inline: keep the layer warm (trickle) so isPictureInPicturePossible stays latched and
       // the next background auto-PiPs reliably. Silent in the logs (diagnostics gated to full rate).
       setTap(enabled: true, fullRate: false)
+      startWarmPump()
     }
   }
 
@@ -244,6 +249,7 @@ final class SampleBufferPiPController: NSObject {
     // misses auto-PiP. The cost is ~0% CPU (2 IOSurface retains/sec); diagnostics are gated to
     // full rate (PiP on screen) so the trickle is silent in the logs.
     setTap(enabled: true, fullRate: false)
+    startWarmPump()  // keep isPictureInPicturePossible latched so the first background auto-PiPs
     log("setup textureId=\(textureId) isLive=\(isLive)")
   }
 
@@ -296,6 +302,7 @@ final class SampleBufferPiPController: NSObject {
   private func stop() { pipController?.stopPictureInPicture() }
 
   private func dispose() {
+    stopWarmPump()
     setTap(enabled: false)
     // Turn OFF auto-PiP: with no video, backgrounding must not auto-start PiP against the
     // (flushed/primer-only) layer and show a black float. setup() re-arms it for the next video.
@@ -389,7 +396,7 @@ final class SampleBufferPiPController: NSObject {
   // A single black frame to make the display layer non-empty (PiP-eligible) before the decoder
   // produces anything. Replaced by the first real frame; frameCount stays 0 so the manual-start
   // path still waits for real video (no black flash on the PiP button).
-  private func enqueuePrimerFrame() {
+  private func enqueuePrimerFrame(verbose: Bool = true) {
     var pb: CVPixelBuffer?
     let attrs: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
     guard CVPixelBufferCreate(
@@ -403,7 +410,28 @@ final class SampleBufferPiPController: NSObject {
     }
     CVPixelBufferUnlockBaseAddress(buffer, [])
     enqueue(buffer)
-    log("primer frame enqueued (PiP eligible before first decode)")
+    if verbose { log("primer frame enqueued (PiP eligible before first decode)") }
+  }
+
+  // The fork only starts feeding real frames at willResignActive (it doesn't post inline), and a
+  // single stale primer is NOT enough for iOS to keep isPictureInPicturePossible latched — it
+  // samples possibility at the instant we background, so the first background after open misses
+  // auto-PiP about half the time (a race). Re-priming the layer ~1/s while inline keeps it
+  // continuously eligible, making first-background auto-PiP deterministic. Paused during PiP (real
+  // frames take over) and stopped on dispose. The 320x180 black frame is invisible (the source
+  // view is 1x1) and replaced by real video the moment PiP starts at full rate.
+  private func startWarmPump() {
+    stopWarmPump()
+    warmPumpTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+      guard let self = self, self.activeTextureId != -1,
+            self.pipController?.isPictureInPictureActive != true else { return }
+      self.enqueuePrimerFrame(verbose: false)
+    }
+  }
+
+  private func stopWarmPump() {
+    warmPumpTimer?.invalidate()
+    warmPumpTimer = nil
   }
 
   private func enqueue(_ pixelBuffer: CVPixelBuffer) {
@@ -535,6 +563,7 @@ extension SampleBufferPiPController: AVPictureInPictureSampleBufferPlaybackDeleg
 extension SampleBufferPiPController: AVPictureInPictureControllerDelegate {
   func pictureInPictureControllerWillStartPictureInPicture(_ c: AVPictureInPictureController) {
     log("WILL start -> full rate")
+    stopWarmPump()  // real frames take over now; no more black primers into the live window
     // Switch to full rate BEFORE the window animates in, so the float opens already at
     // 30fps instead of showing a brief stretch of the ~2fps warm trickle.
     setTap(enabled: true, fullRate: true)
@@ -554,9 +583,10 @@ extension SampleBufferPiPController: AVPictureInPictureControllerDelegate {
     log("DID stop (foreground=\(foreground))")
     channel.invokeMethod("pipDidStop", arguments: ["foreground": foreground])
     if foreground {
-      // Returning to the app inline: keep the layer warm (trickle) so the next background still
-      // auto-PiPs reliably. Silent in the logs (diagnostics gated to full rate).
+      // Returning to the app inline: keep the layer warm (trickle + primer pump) so the next
+      // background still auto-PiPs reliably. Silent in the logs (diagnostics gated to full rate).
       setTap(enabled: true, fullRate: false)
+      startWarmPump()
     } else {
       // Float dismissed while backgrounded: nothing to show, stop the tap entirely.
       setTap(enabled: false)
