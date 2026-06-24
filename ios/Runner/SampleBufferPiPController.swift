@@ -118,9 +118,9 @@ final class SampleBufferPiPController: NSObject {
       log("didBecomeActive while PiP active -> stop PiP")
       pipController?.stopPictureInPicture()
     } else if pipController != nil {
-      // Back inline: tap OFF for zero foreground overhead. The layer keeps its last frame, so a
-      // later background still auto-PiPs (re-armed in onWillResignActive).
-      setTap(enabled: false)
+      // Back inline: keep the layer warm (trickle) so isPictureInPicturePossible stays latched and
+      // the next background auto-PiPs reliably. Silent in the logs (diagnostics gated to full rate).
+      setTap(enabled: true, fullRate: false)
     }
   }
 
@@ -130,7 +130,9 @@ final class SampleBufferPiPController: NSObject {
   // drop to audio-only so we don't keep burning CPU on software decode for a hidden window.
   @objc private func onHwdec(_ note: Notification) {
     let value = (note.userInfo?["value"] as? String) ?? "?"
-    log("hwdec-current at PiP tap: \(value)")
+    // Only log while PiP is on screen (full rate). During the foreground warm trickle this fires
+    // every 2s and is pure noise — but the lock-detection logic below must still run.
+    if tapFullRate { log("hwdec-current at PiP tap: \(value)") }
     if value.hasPrefix("videotoolbox") {
       sawHardware = true
     } else if sawHardware, value != "?", pipController?.isPictureInPictureActive == true {
@@ -232,16 +234,16 @@ final class SampleBufferPiPController: NSObject {
     // Re-arm auto-PiP for this video (dispose() turns it off so backgrounding from a
     // video-less screen can't auto-start PiP against an empty layer -> black float).
     pipController?.canStartPictureInPictureAutomaticallyFromInline = true
-    // Seed the layer NOW with one synthetic frame so isPictureInPicturePossible is true
+    // Seed the layer NOW with one synthetic frame so isPictureInPicturePossible flips toward true
     // immediately. The decoder's first real frame can take seconds (network load); without a
     // primer, backgrounding during that window can't auto-PiP because the layer is empty.
-    // This one frame is what keeps the layer PiP-eligible from now on — the layer retains its
-    // last sample, so we do NOT need to keep feeding it in the foreground.
     enqueuePrimerFrame()
-    // Zero foreground overhead: leave the tap OFF while inline. The primer (above) keeps auto-PiP
-    // possible; onWillResignActive arms the tap just before we background, with enough lead time
-    // (the PiP window animates in ~0.5s later) for a real frame to replace the primer.
-    setTap(enabled: false)
+    // Warm the layer at a ~2fps trickle so isPictureInPicturePossible stays *latched* true. iOS
+    // evaluates it at the instant we background, and a single stale primer is NOT enough — it
+    // needs the layer to have been actively receiving frames, or the FIRST background after open
+    // misses auto-PiP. The cost is ~0% CPU (2 IOSurface retains/sec); diagnostics are gated to
+    // full rate (PiP on screen) so the trickle is silent in the logs.
+    setTap(enabled: true, fullRate: false)
     log("setup textureId=\(textureId) isLive=\(isLive)")
   }
 
@@ -469,14 +471,16 @@ final class SampleBufferPiPController: NSObject {
       let fps = Double(paceFrames) / elapsed
       // maxgap reveals frame-to-frame judder that the fps average hides: at a smooth 30fps it
       // should be ~0.033s. A maxgap far above 1/fps while fps looks fine == visible stutter.
-      // tap= shows what we *requested*: "full" + low fps + skips=0 == the decoder is slow (e.g.
-      // a post-unlock rebuild), not the tap throttling us.
-      log(String(format: "pace %.1ffps maxgap=%.3fs skips=%d ready=%@ status=%d tap=%@ err=%@",
-                 fps, paceMaxGap, enqueueSkips,
-                 layer.isReadyForMoreMediaData ? "Y" : "N",
-                 layer.status.rawValue,
-                 tapFullRate ? "full" : "trickle",
-                 layer.error == nil ? "-" : "\(layer.error!)"))
+      // Only log while PiP is on screen (full rate); the foreground warm trickle would otherwise
+      // spam a ~2fps line every 2s. tap=full + low fps + skips=0 == the decoder is slow (e.g. a
+      // post-unlock rebuild), not the tap throttling us.
+      if tapFullRate {
+        log(String(format: "pace %.1ffps maxgap=%.3fs skips=%d ready=%@ status=%d tap=full err=%@",
+                   fps, paceMaxGap, enqueueSkips,
+                   layer.isReadyForMoreMediaData ? "Y" : "N",
+                   layer.status.rawValue,
+                   layer.error == nil ? "-" : "\(layer.error!)"))
+      }
       paceWindowStart = now
       paceFrames = 0
       enqueueSkips = 0
@@ -550,9 +554,9 @@ extension SampleBufferPiPController: AVPictureInPictureControllerDelegate {
     log("DID stop (foreground=\(foreground))")
     channel.invokeMethod("pipDidStop", arguments: ["foreground": foreground])
     if foreground {
-      // Returning to the app inline: tap OFF (zero foreground overhead). The layer keeps its last
-      // frame, so the next background still auto-PiPs (re-armed in onWillResignActive).
-      setTap(enabled: false)
+      // Returning to the app inline: keep the layer warm (trickle) so the next background still
+      // auto-PiPs reliably. Silent in the logs (diagnostics gated to full rate).
+      setTap(enabled: true, fullRate: false)
     } else {
       // Float dismissed while backgrounded: nothing to show, stop the tap entirely.
       setTap(enabled: false)
