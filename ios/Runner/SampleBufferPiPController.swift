@@ -121,6 +121,17 @@ final class SampleBufferPiPController: NSObject {
         + "active=\(c.isPictureInPictureActive) frames=\(frameCount) "
         + "layerStatus=\(sampleBufferView.displayLayer.status.rawValue) "
         + "tbrate=\(tbrate) isPlaying=\(isPlaying)")
+      // iOS won't auto-PiP a video it thinks is PAUSED, and it reads that from the layer's
+      // controlTimebase rate. Our native isPlaying goes briefly stale-false during a resolution
+      // switch / buffering blip (Dart still reports playing=true), so the rate can be 0 at the
+      // background instant even though the user is actively watching -> auto-PiP silently misses.
+      // Force the timebase to "playing" here so iOS reliably starts PiP; the true play/pause
+      // state reconciles via the next updateState once the float is up. Only do this when not
+      // already in PiP (we're about to background into it).
+      if !c.isPictureInPictureActive, let tb = timebase {
+        isPlaying = true
+        CMTimebaseSetRate(tb, rate: 1.0)
+      }
       setTap(enabled: true)
     }
   }
