@@ -171,6 +171,12 @@ class PlPlayerController with BlockConfigMixin {
   Timer? _timer;
   StreamSubscription<Duration>? _subForSeek;
 
+  // Dev-only: poll native process metrics (CPU%, memory, thermal) into the flutter logs while a
+  // video is set up. Flip to false (or strip with the rest of the [PiP] debug logging) to disable.
+  // iOS has no public GPU-utilisation API; read GPU% from Xcode's GPU gauge / Instruments instead.
+  static const bool _perfMonitor = true;
+  Timer? _perfTimer;
+
   Box setting = GStorage.setting;
 
   // final Durations durations;
@@ -555,6 +561,7 @@ class PlPlayerController with BlockConfigMixin {
         debugPrint('[PiP] setup texture=$id isLive=$isLive');
         IosPip.instance.setup(textureId: id, isLive: isLive);
         _pushIosPipState();
+        _startPerfMonitor();
       }
 
       idListener = () {
@@ -571,6 +578,22 @@ class PlPlayerController with BlockConfigMixin {
         vc.id.addListener(idListener);
       }
     });
+  }
+
+  void _startPerfMonitor() {
+    if (!_perfMonitor || !Platform.isIOS) return;
+    _perfTimer?.cancel();
+    _perfTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      final sample = await IosPip.instance.perfSample();
+      if (sample != null) {
+        debugPrint('[Perf] $sample playing=${playerStatus.isPlaying}');
+      }
+    });
+  }
+
+  void _stopPerfMonitor() {
+    _perfTimer?.cancel();
+    _perfTimer = null;
   }
 
   void updateBufferedSecond() {
@@ -1786,6 +1809,7 @@ class PlPlayerController with BlockConfigMixin {
     resetScreenRotation();
     cancelLongPressTimer();
     _cancelSubForSeek();
+    _stopPerfMonitor();
     if (!_isCloseAll && _playerCount > 1) {
       _playerCount -= 1;
       _heartDuration = 0;

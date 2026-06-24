@@ -182,6 +182,10 @@ final class SampleBufferPiPController: NSObject {
     case "dispose":
       dispose()
       result(nil)
+    case "perfSample":
+      // Dev performance probe: whole-process CPU%, physical memory, thermal state. Dart polls
+      // this on a timer while playing. (No GPU% — iOS exposes none publicly; use Xcode's gauge.)
+      result(PerfMonitor.sample())
     case "updateState":
       let args = call.arguments as? [String: Any]
       isPlaying = (args?["isPlaying"] as? Bool) ?? isPlaying

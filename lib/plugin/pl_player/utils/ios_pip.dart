@@ -68,6 +68,18 @@ class IosPip {
 
   Future<void> dispose() => _invoke('dispose');
 
+  /// Dev-only: one process performance sample (CPU%, memory, thermal) formatted as a string,
+  /// e.g. "cpu=84% mem=312MB thermal=fair cores=6". Returns null if unavailable. iOS has no
+  /// public GPU-utilisation API — use Xcode's GPU gauge / Instruments for that.
+  Future<String?> perfSample() async {
+    if (!_supported) return null;
+    try {
+      return await _channel.invokeMethod<String>('perfSample');
+    } catch (e) {
+      return null;
+    }
+  }
+
   /// Keep the native transport bar accurate.
   Future<void> updateState({
     required bool isPlaying,
