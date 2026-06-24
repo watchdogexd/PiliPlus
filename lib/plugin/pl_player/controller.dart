@@ -644,13 +644,19 @@ class PlPlayerController with BlockConfigMixin {
         if (Platform.isIOS) debugPrint('[PiP] background -> setVideoTrack(no)');
         player.setVideoTrack(VideoTrack.no());
       case AppLifecycleState.resumed:
+        // Only reload the decode chain if the track was actually disabled while
+        // backgrounded. When returning from PiP the track was kept at `auto` the whole
+        // time (see the PiP-active branch above); calling setVideoTrack(auto) on an
+        // already-auto track forces a full decoder rebuild -> a visible hitch on return.
+        final want = onlyPlayAudio.value ? VideoTrack.no() : VideoTrack.auto();
+        final current = player.state.track.video;
         if (Platform.isIOS) {
-          debugPrint('[PiP] resumed -> setVideoTrack('
-              '${onlyPlayAudio.value ? "no" : "auto"})');
+          debugPrint('[PiP] resumed; current=${current.id} want=${want.id} '
+              '${current == want ? "(no reload)" : "-> setVideoTrack(${want.id})"}');
         }
-        player.setVideoTrack(
-          onlyPlayAudio.value ? VideoTrack.no() : VideoTrack.auto(),
-        );
+        if (current != want) {
+          player.setVideoTrack(want);
+        }
       default:
     }
   }

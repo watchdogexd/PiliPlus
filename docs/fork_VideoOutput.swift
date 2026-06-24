@@ -25,6 +25,11 @@ final class MediaKitPiPTap {
   private var fullRate = false
   private var lastPost: CFTimeInterval = 0
   private let trickleInterval: CFTimeInterval = 0.5  // ~2 fps while warming
+  // On (re)enable, post the first few frames at full rate so the AVSampleBufferDisplayLayer
+  // becomes PiP-possible within a few frames of the first decoded frame (instead of the ~2fps
+  // trickle needing >2s). This shrinks the "background immediately after open" auto-PiP miss.
+  private var burstRemaining = 0
+  private let burstFrames = 10
   private init() {
     NotificationCenter.default.addObserver(
       forName: Notification.Name("MediaKitPiPTapControl"), object: nil, queue: nil
@@ -32,16 +37,27 @@ final class MediaKitPiPTap {
       guard let self = self, let info = note.userInfo else { return }
       let enabled = (info["enabled"] as? Bool) ?? false
       let tid = (info["textureId"] as? NSNumber)?.int64Value ?? -1
+      let wasEnabled = self.enabledTextureId != -1
       self.enabledTextureId = enabled ? tid : -1
       self.fullRate = (info["fullRate"] as? Bool) ?? false
+      // Fresh enable (off->on, or a different texture): prime a warm burst.
+      if enabled && (!wasEnabled || self.enabledTextureId != tid) {
+        self.burstRemaining = self.burstFrames
+      }
     }
   }
   func isEnabled(_ id: Int64) -> Bool { id != -1 && id == enabledTextureId }
-  // Gate the expensive copyPixelBuffer + post: every frame during PiP, ~2 fps while warming.
+  // Gate the expensive copyPixelBuffer + post: every frame during PiP, a short burst on enable,
+  // then ~2 fps while warming.
   func shouldPost(_ id: Int64) -> Bool {
     guard isEnabled(id) else { return false }
     if fullRate { return true }
     let now = CACurrentMediaTime()
+    if burstRemaining > 0 {
+      burstRemaining -= 1
+      lastPost = now
+      return true
+    }
     if now - lastPost >= trickleInterval {
       lastPost = now
       return true

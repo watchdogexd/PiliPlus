@@ -46,6 +46,7 @@ final class SampleBufferPiPController: NSObject {
   private var paceFrames = 0
   private var enqueueSkips = 0
   private var lastEnqueueTime: CFTimeInterval = 0
+  private var paceMaxGap: CFTimeInterval = 0  // worst frame-to-frame gap this window (judder)
 
   private var isPlaying = false
   private var isLive = false
@@ -347,10 +348,12 @@ final class SampleBufferPiPController: NSObject {
   // Logs effective fps, dropped frames, and any long gap so playback stalls are visible.
   private func logPacing(layer: AVSampleBufferDisplayLayer) {
     let now = CACurrentMediaTime()
+    let fullRate = timebase != nil && CMTimebaseGetRate(timebase!) > 0
     if lastEnqueueTime != 0 {
       let gap = now - lastEnqueueTime
+      if gap > paceMaxGap { paceMaxGap = gap }
       // Only meaningful at full rate (PiP active); the 2 fps warm trickle has ~0.5s gaps.
-      if gap > 0.4 && timebase != nil && CMTimebaseGetRate(timebase!) > 0 {
+      if gap > 0.4 && fullRate {
         log(String(format: "frame GAP %.3fs status=%d skips=%d", gap, layer.status.rawValue, enqueueSkips))
       }
     }
@@ -360,14 +363,17 @@ final class SampleBufferPiPController: NSObject {
     let elapsed = now - paceWindowStart
     if elapsed >= 2.0 {
       let fps = Double(paceFrames) / elapsed
-      log(String(format: "pace %.1ffps skips=%d ready=%@ status=%d err=%@",
-                 fps, enqueueSkips,
+      // maxgap reveals frame-to-frame judder that the fps average hides: at a smooth 30fps it
+      // should be ~0.033s. A maxgap far above 1/fps while fps looks fine == visible stutter.
+      log(String(format: "pace %.1ffps maxgap=%.3fs skips=%d ready=%@ status=%d err=%@",
+                 fps, paceMaxGap, enqueueSkips,
                  layer.isReadyForMoreMediaData ? "Y" : "N",
                  layer.status.rawValue,
                  layer.error == nil ? "-" : "\(layer.error!)"))
       paceWindowStart = now
       paceFrames = 0
       enqueueSkips = 0
+      paceMaxGap = 0
     }
   }
 }
@@ -417,14 +423,16 @@ extension SampleBufferPiPController: AVPictureInPictureSampleBufferPlaybackDeleg
 @available(iOS 15.0, *)
 extension SampleBufferPiPController: AVPictureInPictureControllerDelegate {
   func pictureInPictureControllerWillStartPictureInPicture(_ c: AVPictureInPictureController) {
-    log("WILL start")
+    log("WILL start -> full rate")
+    // Switch to full rate BEFORE the window animates in, so the float opens already at
+    // 30fps instead of showing a brief stretch of the ~2fps warm trickle.
+    setTap(enabled: true, fullRate: true)
     channel.invokeMethod("pipWillStart", arguments: nil)
   }
 
   func pictureInPictureControllerDidStartPictureInPicture(_ c: AVPictureInPictureController) {
     log("DID start")
-    // Window is on screen now: feed every frame for smooth playback.
-    setTap(enabled: true, fullRate: true)
+    setTap(enabled: true, fullRate: true)  // idempotent; ensure full rate
   }
 
   func pictureInPictureControllerDidStopPictureInPicture(_ c: AVPictureInPictureController) {
