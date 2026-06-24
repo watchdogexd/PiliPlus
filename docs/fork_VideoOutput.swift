@@ -75,7 +75,7 @@ public class VideoOutput: NSObject {
   private var textureId: Int64 = -1
   private var currentSize: CGSize = CGSize.zero
   private var disposed: Bool = false
-  private var pipHwdecLogged = false
+  private var lastHwdecProbe: CFTimeInterval = 0
 
   init(
     handle: Int64,
@@ -195,8 +195,11 @@ public class VideoOutput: NSObject {
 
     #if os(iOS)
     if MediaKitPiPTap.shared.isEnabled(textureId) {
-      if !pipHwdecLogged {
-        pipHwdecLogged = true
+      // Probe hwdec-current every ~2s (not once) so a background VideoToolbox -> software
+      // fallback shows up in the logs as the cause of any stutter.
+      let nowProbe = CACurrentMediaTime()
+      if nowProbe - lastHwdecProbe >= 2.0 {
+        lastHwdecProbe = nowProbe
         var hwdec = "unknown"
         if let c = mpv_get_property_string(handle, "hwdec-current") {
           hwdec = String(cString: c)
@@ -213,7 +216,7 @@ public class VideoOutput: NSObject {
           userInfo: ["textureId": NSNumber(value: textureId), "pixelBuffer": pb])
       }
     } else {
-      pipHwdecLogged = false
+      lastHwdecProbe = 0
     }
     #endif
 

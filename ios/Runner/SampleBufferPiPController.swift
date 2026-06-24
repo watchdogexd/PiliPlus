@@ -3,6 +3,7 @@ import CoreMedia
 import CoreVideo
 import Flutter
 import Foundation
+import QuartzCore
 import UIKit
 
 // iOS Picture-in-Picture for a libmpv/media_kit-backed player.
@@ -40,6 +41,12 @@ final class SampleBufferPiPController: NSObject {
   private var frameMismatchLogged = false
   private var timebase: CMTimebase?
 
+  // Frame-pacing diagnostics: detect stalls/drops in the PiP layer.
+  private var paceWindowStart: CFTimeInterval = 0
+  private var paceFrames = 0
+  private var enqueueSkips = 0
+  private var lastEnqueueTime: CFTimeInterval = 0
+
   private var isPlaying = false
   private var isLive = false
   private var positionSeconds: Double = 0
@@ -66,8 +73,9 @@ final class SampleBufferPiPController: NSObject {
   deinit { NotificationCenter.default.removeObserver(self) }
 
   private func log(_ s: String) {
-    NSLog("[PiP] \(s)")
-    DispatchQueue.main.async { self.channel.invokeMethod("log", arguments: s) }
+    let stamped = String(format: "%.3f %@", CACurrentMediaTime(), s)
+    NSLog("[PiP] \(stamped)")
+    DispatchQueue.main.async { self.channel.invokeMethod("log", arguments: stamped) }
   }
 
   @objc private func onWillResignActive() {
@@ -138,6 +146,10 @@ final class SampleBufferPiPController: NSObject {
     formatDescription = nil
     frameCount = 0
     frameMismatchLogged = false
+    paceWindowStart = 0
+    paceFrames = 0
+    enqueueSkips = 0
+    lastEnqueueTime = 0
 
     // New stream: clear any frames from the previous one.
     sampleBufferView.displayLayer.flushAndRemoveImage()
@@ -324,7 +336,39 @@ final class SampleBufferPiPController: NSObject {
       dict[kCMSampleAttachmentKey_DisplayImmediately as NSString] = true
     }
 
-    if layer.isReadyForMoreMediaData { layer.enqueue(sb) }
+    if layer.isReadyForMoreMediaData {
+      layer.enqueue(sb)
+    } else {
+      enqueueSkips += 1  // layer back-pressure: a dropped frame
+    }
+    logPacing(layer: layer)
+  }
+
+  // Logs effective fps, dropped frames, and any long gap so playback stalls are visible.
+  private func logPacing(layer: AVSampleBufferDisplayLayer) {
+    let now = CACurrentMediaTime()
+    if lastEnqueueTime != 0 {
+      let gap = now - lastEnqueueTime
+      // Only meaningful at full rate (PiP active); the 2 fps warm trickle has ~0.5s gaps.
+      if gap > 0.4 && timebase != nil && CMTimebaseGetRate(timebase!) > 0 {
+        log(String(format: "frame GAP %.3fs status=%d skips=%d", gap, layer.status.rawValue, enqueueSkips))
+      }
+    }
+    lastEnqueueTime = now
+    if paceWindowStart == 0 { paceWindowStart = now }
+    paceFrames += 1
+    let elapsed = now - paceWindowStart
+    if elapsed >= 2.0 {
+      let fps = Double(paceFrames) / elapsed
+      log(String(format: "pace %.1ffps skips=%d ready=%@ status=%d err=%@",
+                 fps, enqueueSkips,
+                 layer.isReadyForMoreMediaData ? "Y" : "N",
+                 layer.status.rawValue,
+                 layer.error == nil ? "-" : "\(layer.error!)"))
+      paceWindowStart = now
+      paceFrames = 0
+      enqueueSkips = 0
+    }
   }
 }
 

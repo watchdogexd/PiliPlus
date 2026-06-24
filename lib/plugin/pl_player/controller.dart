@@ -496,16 +496,25 @@ class PlPlayerController with BlockConfigMixin {
     IosPip.instance.onPipWillStart = () {
       isPipActive.value = true;
       final player = _videoPlayerController;
-      if (player == null || onlyPlayAudio.value) return;
+      if (player == null || onlyPlayAudio.value) {
+        debugPrint('[PiP] willStart: no track change '
+            '(player=${player != null} audioOnly=${onlyPlayAudio.value})');
+        return;
+      }
       // Only re-enable video if it was actually dropped (e.g. the background lifecycle
       // handler raced ahead and disabled it). Re-selecting an already-active track forces
       // mpv to reload the whole decode chain — the visible hitch right as PiP starts.
-      if (player.state.track.video == VideoTrack.no()) {
+      final vid = player.state.track.video;
+      if (vid == VideoTrack.no()) {
+        debugPrint('[PiP] willStart: video was OFF -> setVideoTrack(auto) [RELOAD]');
         player.setVideoTrack(VideoTrack.auto());
+      } else {
+        debugPrint('[PiP] willStart: video already on (${vid.id}); no reload');
       }
     };
     IosPip.instance.onPipDidStop = (foreground) {
       isPipActive.value = false;
+      debugPrint('[PiP] didStop foreground=$foreground');
       // Returning to the app: keep the decode chain intact. Tearing the video track
       // down here (and rebuilding it on resume) is what caused the lag on return.
       if (foreground) return;
@@ -513,6 +522,7 @@ class PlPlayerController with BlockConfigMixin {
       // (mirrors the background behaviour in _onAppLifecycleState).
       final player = _videoPlayerController;
       if (player == null || onlyPlayAudio.value) return;
+      debugPrint('[PiP] didStop background -> setVideoTrack(no)');
       player.setVideoTrack(VideoTrack.no());
     };
     debugPrint('[PiP] _setupIosPip running; awaiting ensureSupported');
@@ -617,13 +627,27 @@ class PlPlayerController with BlockConfigMixin {
   // back to software. Disable video decode in background, restore on resume.
   void _onAppLifecycleState(AppLifecycleState state) {
     final player = _videoPlayerController;
+    if (Platform.isIOS) {
+      debugPrint('[PiP] lifecycle=$state pipActive=${isPipActive.value} '
+          'video=${player?.state.track.video.id}');
+    }
     if (player == null) return;
     switch (state) {
       case AppLifecycleState.hidden || AppLifecycleState.paused:
         // Keep decoding while PiP is presenting video; it needs the frames.
-        if (isPipActive.value) return;
+        if (isPipActive.value) {
+          if (Platform.isIOS) {
+            debugPrint('[PiP] background but PiP active -> keep video decoding');
+          }
+          return;
+        }
+        if (Platform.isIOS) debugPrint('[PiP] background -> setVideoTrack(no)');
         player.setVideoTrack(VideoTrack.no());
       case AppLifecycleState.resumed:
+        if (Platform.isIOS) {
+          debugPrint('[PiP] resumed -> setVideoTrack('
+              '${onlyPlayAudio.value ? "no" : "auto"})');
+        }
         player.setVideoTrack(
           onlyPlayAudio.value ? VideoTrack.no() : VideoTrack.auto(),
         );
