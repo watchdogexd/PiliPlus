@@ -48,6 +48,14 @@ final class SampleBufferPiPController: NSObject {
   private var lastEnqueueTime: CFTimeInterval = 0
   private var paceMaxGap: CFTimeInterval = 0  // worst frame-to-frame gap this window (judder)
 
+  // Set once we've dropped to audio-only because the screen locked / hardware decode was
+  // reclaimed during PiP; cleared when the screen unlocks or we return to the app.
+  private var lockedAudioOnly = false
+  // Whether we've seen hardware decode this PiP session. A hardware->software transition means
+  // the OS reclaimed the decoder (screen lock); a stream that was software from the start (user
+  // disabled HA) must NOT be mistaken for that.
+  private var sawHardware = false
+
   private var isPlaying = false
   private var isLive = false
   private var positionSeconds: Double = 0
@@ -67,6 +75,15 @@ final class SampleBufferPiPController: NSObject {
       name: UIApplication.didBecomeActiveNotification, object: nil)
     NotificationCenter.default.addObserver(
       self, selector: #selector(onHwdec(_:)), name: Self.hwdecNotification, object: nil)
+    // Device lock / unlock (fires when the user has a passcode). While locked the PiP float is
+    // not shown, so we drop video decode to audio-only and restore it (re-acquiring hardware
+    // decode) on unlock.
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(onProtectedDataUnavailable),
+      name: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(onProtectedDataAvailable),
+      name: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil)
 
     log("init; PiP supported=\(AVPictureInPictureController.isPictureInPictureSupported())")
   }
@@ -87,6 +104,8 @@ final class SampleBufferPiPController: NSObject {
   }
 
   @objc private func onDidBecomeActive() {
+    // Back in the app (screen on): the resume lifecycle handler restores the video track.
+    lockedAudioOnly = false
     // Returning to the app should dismiss the float (the inline player takes over again).
     if pipController?.isPictureInPictureActive == true {
       log("didBecomeActive while PiP active -> stop PiP")
@@ -97,11 +116,42 @@ final class SampleBufferPiPController: NSObject {
     }
   }
 
-  // Diagnostic: mpv's hwdec-current, read by the fork when the PiP tap turns on.
-  // "videotoolbox" = hardware decode still active during PiP; "no"/sw = software fallback.
+  // mpv's hwdec-current, read by the fork while the PiP tap is on.
+  // "videotoolbox" = hardware decode; "no"/sw = the OS reclaimed hardware (it does this when
+  // the device locks). Losing hardware mid-PiP is our most reliable "screen locked" signal:
+  // drop to audio-only so we don't keep burning CPU on software decode for a hidden window.
   @objc private func onHwdec(_ note: Notification) {
     let value = (note.userInfo?["value"] as? String) ?? "?"
     log("hwdec-current at PiP tap: \(value)")
+    if value.hasPrefix("videotoolbox") {
+      sawHardware = true
+    } else if sawHardware, value != "?", pipController?.isPictureInPictureActive == true {
+      enterAudioOnly(reason: "hwdec lost (\(value))")
+    }
+  }
+
+  // Lock / unlock (passcode users). protectedDataUnavailable is a proactive lock signal that
+  // beats the hwdec-loss one above; whichever fires first wins (enterAudioOnly is idempotent).
+  @objc private func onProtectedDataUnavailable() {
+    if pipController?.isPictureInPictureActive == true {
+      enterAudioOnly(reason: "device locked")
+    }
+  }
+
+  @objc private func onProtectedDataAvailable() {
+    guard lockedAudioOnly, pipController?.isPictureInPictureActive == true else { return }
+    lockedAudioOnly = false
+    log("unlocked -> restore video, full rate")
+    channel.invokeMethod("screenUnlocked", arguments: nil)
+    setTap(enabled: true, fullRate: true)
+  }
+
+  private func enterAudioOnly(reason: String) {
+    guard !lockedAudioOnly else { return }
+    lockedAudioOnly = true
+    log("\(reason) during PiP -> audio only (drop video, tap off)")
+    setTap(enabled: false)  // the float is hidden while locked; stop feeding frames
+    channel.invokeMethod("screenLocked", arguments: nil)
   }
 
   // MARK: - MethodChannel
@@ -151,6 +201,8 @@ final class SampleBufferPiPController: NSObject {
     paceFrames = 0
     enqueueSkips = 0
     lastEnqueueTime = 0
+    lockedAudioOnly = false
+    sawHardware = false
 
     // New stream: clear any frames from the previous one.
     sampleBufferView.displayLayer.flushAndRemoveImage()
@@ -165,8 +217,11 @@ final class SampleBufferPiPController: NSObject {
       controller.delegate = self
       pipController = controller
     }
-    // Warm the layer immediately (trickle) so native auto-PiP is possible even if the user
-    // backgrounds right after the first frame, not only after watching for a while.
+    // Seed the layer NOW with one synthetic frame so isPictureInPicturePossible is true
+    // immediately. The decoder's first real frame can take seconds (network load); without a
+    // primer, backgrounding during that window can't auto-PiP because the layer is empty.
+    enqueuePrimerFrame()
+    // Warm the layer (trickle) so native auto-PiP stays possible the instant we background.
     setTap(enabled: true, fullRate: false)
     log("setup textureId=\(textureId) isLive=\(isLive)")
   }
@@ -304,6 +359,26 @@ final class SampleBufferPiPController: NSObject {
       log("first frame texture=\(tid) \(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer))")
     }
     enqueue(pixelBuffer)
+  }
+
+  // A single black frame to make the display layer non-empty (PiP-eligible) before the decoder
+  // produces anything. Replaced by the first real frame; frameCount stays 0 so the manual-start
+  // path still waits for real video (no black flash on the PiP button).
+  private func enqueuePrimerFrame() {
+    var pb: CVPixelBuffer?
+    let attrs: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
+    guard CVPixelBufferCreate(
+            kCFAllocatorDefault, 320, 180, kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary, &pb) == kCVReturnSuccess,
+          let buffer = pb
+    else { return }
+    CVPixelBufferLockBaseAddress(buffer, [])
+    if let base = CVPixelBufferGetBaseAddress(buffer) {
+      memset(base, 0, CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer))
+    }
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    enqueue(buffer)
+    log("primer frame enqueued (PiP eligible before first decode)")
   }
 
   private func enqueue(_ pixelBuffer: CVPixelBuffer) {

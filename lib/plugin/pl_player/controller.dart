@@ -525,6 +525,27 @@ class PlPlayerController with BlockConfigMixin {
       debugPrint('[PiP] didStop background -> setVideoTrack(no)');
       player.setVideoTrack(VideoTrack.no());
     };
+    IosPip.instance.onScreenLocked = () {
+      // Only relevant while PiP is presenting; a normal background (no PiP) already
+      // dropped the track. The lock screen never shows the PiP float, so software
+      // decoding here is pure waste — play audio only.
+      if (!isPipActive.value) return;
+      final player = _videoPlayerController;
+      if (player == null || onlyPlayAudio.value) return;
+      if (player.state.track.video != VideoTrack.no()) {
+        debugPrint('[PiP] screen locked -> setVideoTrack(no) (audio only)');
+        player.setVideoTrack(VideoTrack.no());
+      }
+    };
+    IosPip.instance.onScreenUnlocked = () {
+      if (!isPipActive.value) return;
+      final player = _videoPlayerController;
+      if (player == null || onlyPlayAudio.value) return;
+      if (player.state.track.video == VideoTrack.no()) {
+        debugPrint('[PiP] screen unlocked -> setVideoTrack(auto) (re-acquire videotoolbox)');
+        player.setVideoTrack(VideoTrack.auto());
+      }
+    };
     debugPrint('[PiP] _setupIosPip running; awaiting ensureSupported');
     IosPip.instance.ensureSupported().then((ok) {
       debugPrint('[PiP] ensureSupported -> $ok (stale=${_videoController != vc})');

@@ -31,6 +31,15 @@ class IosPip {
   void Function(bool foreground)? onPipDidStop;
   void Function(String message)? onPipError;
 
+  /// Device locked (or iOS reclaimed the hardware decoder) while PiP was active.
+  /// The PiP float isn't shown on the lock screen, so there's no point running
+  /// (software) video decode — drop the video track and keep audio only.
+  VoidCallback? onScreenLocked;
+
+  /// Device unlocked while PiP is still active: restore the video track so mpv
+  /// re-initialises decode and re-acquires VideoToolbox hardware decoding.
+  VoidCallback? onScreenUnlocked;
+
   Future<bool> ensureSupported() async {
     if (!Platform.isIOS) return false;
     if (!_inited) {
@@ -97,6 +106,10 @@ class IosPip {
       case 'pipDidStop':
         final fg = (call.arguments as Map?)?['foreground'] as bool? ?? false;
         onPipDidStop?.call(fg);
+      case 'screenLocked':
+        onScreenLocked?.call();
+      case 'screenUnlocked':
+        onScreenUnlocked?.call();
       case 'pipError':
         onPipError?.call(call.arguments as String? ?? '');
     }
