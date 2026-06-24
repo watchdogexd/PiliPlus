@@ -118,8 +118,9 @@ final class SampleBufferPiPController: NSObject {
       log("didBecomeActive while PiP active -> stop PiP")
       pipController?.stopPictureInPicture()
     } else if pipController != nil {
-      // Keep the layer warm (trickle) so a later background still auto-PiPs.
-      setTap(enabled: true, fullRate: false)
+      // Back inline: tap OFF for zero foreground overhead. The layer keeps its last frame, so a
+      // later background still auto-PiPs (re-armed in onWillResignActive).
+      setTap(enabled: false)
     }
   }
 
@@ -234,9 +235,13 @@ final class SampleBufferPiPController: NSObject {
     // Seed the layer NOW with one synthetic frame so isPictureInPicturePossible is true
     // immediately. The decoder's first real frame can take seconds (network load); without a
     // primer, backgrounding during that window can't auto-PiP because the layer is empty.
+    // This one frame is what keeps the layer PiP-eligible from now on — the layer retains its
+    // last sample, so we do NOT need to keep feeding it in the foreground.
     enqueuePrimerFrame()
-    // Warm the layer (trickle) so native auto-PiP stays possible the instant we background.
-    setTap(enabled: true, fullRate: false)
+    // Zero foreground overhead: leave the tap OFF while inline. The primer (above) keeps auto-PiP
+    // possible; onWillResignActive arms the tap just before we background, with enough lead time
+    // (the PiP window animates in ~0.5s later) for a real frame to replace the primer.
+    setTap(enabled: false)
     log("setup textureId=\(textureId) isLive=\(isLive)")
   }
 
@@ -545,8 +550,9 @@ extension SampleBufferPiPController: AVPictureInPictureControllerDelegate {
     log("DID stop (foreground=\(foreground))")
     channel.invokeMethod("pipDidStop", arguments: ["foreground": foreground])
     if foreground {
-      // Returning to the app: keep the layer warm (trickle) so the next PiP starts instantly.
-      setTap(enabled: true, fullRate: false)
+      // Returning to the app inline: tap OFF (zero foreground overhead). The layer keeps its last
+      // frame, so the next background still auto-PiPs (re-armed in onWillResignActive).
+      setTap(enabled: false)
     } else {
       // Float dismissed while backgrounded: nothing to show, stop the tap entirely.
       setTap(enabled: false)
