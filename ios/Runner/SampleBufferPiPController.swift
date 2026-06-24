@@ -48,6 +48,11 @@ final class SampleBufferPiPController: NSObject {
   private var lastEnqueueTime: CFTimeInterval = 0
   private var paceMaxGap: CFTimeInterval = 0  // worst frame-to-frame gap this window (judder)
 
+  // Mirrors the last fullRate we requested via setTap(). The fork decides the *actual* post
+  // rate; comparing requested-vs-observed fps tells us whether a low pace is the tap throttling
+  // (warm trickle) or the decoder genuinely being slow (post-unlock rebuild).
+  private var tapFullRate = false
+
   // Set once we've dropped to audio-only because the screen locked / hardware decode was
   // reclaimed during PiP; cleared when the screen unlocks or we return to the app.
   private var lockedAudioOnly = false
@@ -337,6 +342,7 @@ final class SampleBufferPiPController: NSObject {
   // "warm" at ~2 fps (cheap) so iOS auto-PiP is possible the instant we background; fullRate:true
   // feeds every frame, used only while the PiP window is on screen.
   private func setTap(enabled: Bool, fullRate: Bool = false) {
+    tapFullRate = enabled && fullRate
     NotificationCenter.default.post(
       name: Self.tapControlNotification, object: nil,
       userInfo: [
@@ -392,8 +398,13 @@ final class SampleBufferPiPController: NSObject {
   private func enqueue(_ pixelBuffer: CVPixelBuffer) {
     let layer = sampleBufferView.displayLayer
     if layer.status == .failed {
-      log("layer failed (\(String(describing: layer.error))) -> flush")
+      log("layer failed (\(String(describing: layer.error))) -> flush + rebuild format")
       layer.flush()
+      // Start clean: a format description created before the interruption (lock / -11847
+      // "Operation Interrupted") can re-fail the layer. Force the next frame to rebuild it.
+      formatDescription = nil
+      lastPixelBufferWidth = 0
+      lastPixelBufferHeight = 0
     }
 
     let w = CVPixelBufferGetWidth(pixelBuffer)
@@ -431,12 +442,13 @@ final class SampleBufferPiPController: NSObject {
   // Logs effective fps, dropped frames, and any long gap so playback stalls are visible.
   private func logPacing(layer: AVSampleBufferDisplayLayer) {
     let now = CACurrentMediaTime()
-    let fullRate = timebase != nil && CMTimebaseGetRate(timebase!) > 0
     if lastEnqueueTime != 0 {
       let gap = now - lastEnqueueTime
       if gap > paceMaxGap { paceMaxGap = gap }
-      // Only meaningful at full rate (PiP active); the 2 fps warm trickle has ~0.5s gaps.
-      if gap > 0.4 && fullRate {
+      // A gap is only a stall when we *asked* for every frame (PiP on screen). The ~2 fps warm
+      // trickle has ~0.5s gaps by design — gating on the requested tap rate (not the playback
+      // timebase) keeps those out of the log so a real stall stands out.
+      if gap > 0.4 && tapFullRate {
         log(String(format: "frame GAP %.3fs status=%d skips=%d", gap, layer.status.rawValue, enqueueSkips))
       }
     }
@@ -448,10 +460,13 @@ final class SampleBufferPiPController: NSObject {
       let fps = Double(paceFrames) / elapsed
       // maxgap reveals frame-to-frame judder that the fps average hides: at a smooth 30fps it
       // should be ~0.033s. A maxgap far above 1/fps while fps looks fine == visible stutter.
-      log(String(format: "pace %.1ffps maxgap=%.3fs skips=%d ready=%@ status=%d err=%@",
+      // tap= shows what we *requested*: "full" + low fps + skips=0 == the decoder is slow (e.g.
+      // a post-unlock rebuild), not the tap throttling us.
+      log(String(format: "pace %.1ffps maxgap=%.3fs skips=%d ready=%@ status=%d tap=%@ err=%@",
                  fps, paceMaxGap, enqueueSkips,
                  layer.isReadyForMoreMediaData ? "Y" : "N",
                  layer.status.rawValue,
+                 tapFullRate ? "full" : "trickle",
                  layer.error == nil ? "-" : "\(layer.error!)"))
       paceWindowStart = now
       paceFrames = 0
