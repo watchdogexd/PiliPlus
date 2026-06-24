@@ -208,10 +208,16 @@ final class SampleBufferPiPController: NSObject {
 
   private func dispose() {
     setTap(enabled: false)
-    pipController?.stopPictureInPicture()
-    pipController = nil
+    // Dismiss the float if it's up. Keep the controller (it's created once and bound to the
+    // persistent layer); the next video reuses it. Nil-ing it here can abort the dismissal.
+    if pipController?.isPictureInPictureActive == true {
+      pipController?.stopPictureInPicture()
+    }
     activeTextureId = -1
+    frameCount = 0
+    formatDescription = nil
     sampleBufferView.displayLayer.flushAndRemoveImage()
+    log("dispose: tap off, PiP stopped")
   }
 
   // The display layer must live in the on-screen view hierarchy for PiP to be possible.
@@ -378,10 +384,19 @@ extension SampleBufferPiPController: AVPictureInPictureControllerDelegate {
   }
 
   func pictureInPictureControllerDidStopPictureInPicture(_ c: AVPictureInPictureController) {
-    log("DID stop")
-    channel.invokeMethod("pipDidStop", arguments: nil)
-    // Drop back to the warm trickle (don't flush) so the next PiP can start instantly.
-    setTap(enabled: true, fullRate: false)
+    // applicationState is authoritative for *why* PiP stopped, with no race against
+    // Flutter's lifecycle channel: .active => the app is returning to foreground; otherwise
+    // the user closed the float while still backgrounded.
+    let foreground = UIApplication.shared.applicationState == .active
+    log("DID stop (foreground=\(foreground))")
+    channel.invokeMethod("pipDidStop", arguments: ["foreground": foreground])
+    if foreground {
+      // Returning to the app: keep the layer warm (trickle) so the next PiP starts instantly.
+      setTap(enabled: true, fullRate: false)
+    } else {
+      // Float dismissed while backgrounded: nothing to show, stop the tap entirely.
+      setTap(enabled: false)
+    }
   }
 
   // Required for a clean dismissal back to the app.

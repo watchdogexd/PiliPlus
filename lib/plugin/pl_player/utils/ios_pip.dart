@@ -24,7 +24,11 @@ class IosPip {
   void Function(bool playing)? onSetPlaying;
   void Function(double seconds)? onSkip;
   VoidCallback? onPipWillStart;
-  VoidCallback? onPipDidStop;
+
+  /// [foreground] is true when PiP stopped because the app returned to the
+  /// foreground (don't tear down decode), false when the user closed the float
+  /// while still backgrounded (safe to drop the video track to save power).
+  void Function(bool foreground)? onPipDidStop;
   void Function(String message)? onPipError;
 
   Future<bool> ensureSupported() async {
@@ -91,7 +95,8 @@ class IosPip {
       case 'pipWillStart':
         onPipWillStart?.call();
       case 'pipDidStop':
-        onPipDidStop?.call();
+        final fg = (call.arguments as Map?)?['foreground'] as bool? ?? false;
+        onPipDidStop?.call(fg);
       case 'pipError':
         onPipError?.call(call.arguments as String? ?? '');
     }

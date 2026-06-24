@@ -2066,28 +2066,37 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
           childKey: _videoKey,
           child: RepaintBoundary(
             key: _videoKey,
-            child: Obx(
-              () {
-                // While iOS PiP shows the video, hide the inline copy (mpv keeps decoding
-                // to feed the float). Prevents two videos playing at once.
-                if (plPlayerController.isPipActive.value) {
-                  return const ColoredBox(color: Colors.black);
-                }
-                final videoFit = plPlayerController.videoFit.value;
-                return Transform.flip(
-                  flipX: plPlayerController.flipX.value,
-                  flipY: plPlayerController.flipY.value,
-                  child: FittedBox(
-                    fit: videoFit.boxFit,
-                    alignment: widget.alignment,
-                    child: SimpleVideo(
-                      controller: plPlayerController.videoController!,
-                      fill: widget.fill,
-                      aspectRatio: videoFit.aspectRatio,
-                    ),
-                  ),
-                );
-              },
+            child: Stack(
+              children: [
+                // The video stays mounted at all times so its Flutter texture is never
+                // detached. Tearing it down for PiP and re-attaching on return caused a
+                // hitch; instead we just cover it (below) while the PiP float is showing.
+                Obx(
+                  () {
+                    final videoFit = plPlayerController.videoFit.value;
+                    return Transform.flip(
+                      flipX: plPlayerController.flipX.value,
+                      flipY: plPlayerController.flipY.value,
+                      child: FittedBox(
+                        fit: videoFit.boxFit,
+                        alignment: widget.alignment,
+                        child: SimpleVideo(
+                          controller: plPlayerController.videoController!,
+                          fill: widget.fill,
+                          aspectRatio: videoFit.aspectRatio,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                // While iOS PiP shows the video, cover the inline copy so two videos
+                // aren't visibly playing at once (mpv keeps decoding to feed the float).
+                Obx(
+                  () => plPlayerController.isPipActive.value
+                      ? const Positioned.fill(child: ColoredBox(color: Colors.black))
+                      : const SizedBox.shrink(),
+                ),
+              ],
             ),
           ),
         ),

@@ -501,17 +501,16 @@ class PlPlayerController with BlockConfigMixin {
         player.setVideoTrack(VideoTrack.auto());
       }
     };
-    IosPip.instance.onPipDidStop = () {
+    IosPip.instance.onPipDidStop = (foreground) {
       isPipActive.value = false;
-      // If PiP closed while the app is still backgrounded, drop decode to save power
+      // Returning to the app: keep the decode chain intact. Tearing the video track
+      // down here (and rebuilding it on resume) is what caused the lag on return.
+      if (foreground) return;
+      // PiP closed while the app is still backgrounded: drop decode to save power
       // (mirrors the background behaviour in _onAppLifecycleState).
       final player = _videoPlayerController;
-      if (player == null) return;
-      final state = _lastLifecycleState;
-      if (state == AppLifecycleState.hidden ||
-          state == AppLifecycleState.paused) {
-        player.setVideoTrack(VideoTrack.no());
-      }
+      if (player == null || onlyPlayAudio.value) return;
+      player.setVideoTrack(VideoTrack.no());
     };
     debugPrint('[PiP] _setupIosPip running; awaiting ensureSupported');
     IosPip.instance.ensureSupported().then((ok) {
@@ -610,12 +609,10 @@ class PlPlayerController with BlockConfigMixin {
   // frames; the background decode-disable below must not fire during PiP.
   // Observable so the inline video can be hidden while PiP is up.
   final RxBool isPipActive = false.obs;
-  AppLifecycleState? _lastLifecycleState;
 
   // iOS drops the VideoToolbox session in background; decoding through it falls
   // back to software. Disable video decode in background, restore on resume.
   void _onAppLifecycleState(AppLifecycleState state) {
-    _lastLifecycleState = state;
     final player = _videoPlayerController;
     if (player == null) return;
     switch (state) {
@@ -1750,6 +1747,12 @@ class PlPlayerController with BlockConfigMixin {
     _appLifecycleListener = null;
     _stopOrientationListener();
     _disableAutoEnterPip();
+    if (Platform.isIOS) {
+      // Leaving the player: dismiss any active PiP float and stop the frame tap,
+      // otherwise the window stays stuck showing the last decoded frame.
+      isPipActive.value = false;
+      IosPip.instance.dispose();
+    }
     setPlayCallBack(null);
     dmState.clear();
     if (showSeekPreview) {
