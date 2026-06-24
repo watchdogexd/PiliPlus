@@ -64,6 +64,7 @@ final class SampleBufferPiPController: NSObject {
   // Re-primes the display layer ~1/s while inline so isPictureInPicturePossible stays latched true
   // and the first background after opening a video reliably auto-PiPs (see startWarmPump).
   private var warmPumpTimer: Timer?
+  private var lastPossible = false  // diagnostic: track isPictureInPicturePossible transitions
 
   private var isPlaying = false
   private var isLive = false
@@ -108,8 +109,14 @@ final class SampleBufferPiPController: NSObject {
   @objc private func onWillResignActive() {
     // Only arm the tap when a video is actually set up. After dispose (left the player)
     // activeTextureId is -1; arming here would feed/keep the layer warm for nothing.
-    if pipController != nil, activeTextureId != -1 {
-      log("willResignActive -> enable tap")
+    if let c = pipController, activeTextureId != -1 {
+      // DIAGNOSTIC: auto-PiP from inline only fires if isPictureInPicturePossible is true at THIS
+      // instant. Log the gate so we can see whether the first-background miss is "possible=false"
+      // (eligibility race) or possible=true-but-still-no-start (a different cause).
+      log("willResignActive -> enable tap | possible=\(c.isPictureInPicturePossible) "
+        + "autoInline=\(c.canStartPictureInPictureAutomaticallyFromInline) "
+        + "active=\(c.isPictureInPictureActive) frames=\(frameCount) "
+        + "layerStatus=\(sampleBufferView.displayLayer.status.rawValue)")
       setTap(enabled: true)
     }
   }
@@ -423,9 +430,17 @@ final class SampleBufferPiPController: NSObject {
   private func startWarmPump() {
     stopWarmPump()
     warmPumpTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-      guard let self = self, self.activeTextureId != -1,
-            self.pipController?.isPictureInPictureActive != true else { return }
+      guard let self = self, let c = self.pipController, self.activeTextureId != -1,
+            c.isPictureInPictureActive != true else { return }
       self.enqueuePrimerFrame(verbose: false)
+      // DIAGNOSTIC: log only when possibility flips, so we can see whether re-priming with black
+      // frames is enough to make iOS report the layer PiP-eligible while inline (the thing the
+      // first-background auto-PiP depends on).
+      let p = c.isPictureInPicturePossible
+      if p != self.lastPossible {
+        self.lastPossible = p
+        self.log("warm pump: isPictureInPicturePossible -> \(p) (frames=\(self.frameCount))")
+      }
     }
   }
 
