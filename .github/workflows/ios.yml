@@ -34,6 +34,28 @@ jobs:
         shell: pwsh
         run: lib/scripts/patch.ps1 iOS
 
+      - name: Resolve dependencies
+        run: flutter pub get
+
+      # The vendored media_kit fork (My-Responsitories/media-kit) does NOT contain the iOS PiP
+      # frame tap. Copy our patched VideoOutput.swift over the pub-cache copy so the CI build's
+      # PiP actually receives frames. Must run after `flutter pub get` (git dep resolved) and
+      # before the build. No-op on branches without the patch file.
+      - name: Apply media_kit iOS PiP frame-tap patch
+        run: |
+          if [ ! -f docs/fork_VideoOutput.swift ]; then
+            echo "docs/fork_VideoOutput.swift not present — skipping PiP fork patch"
+            exit 0
+          fi
+          TARGET=$(find "${PUB_CACHE:-$HOME/.pub-cache}/git" \
+            -path '*media-kit-*/media_kit_video/common/darwin/Classes/plugin/VideoOutput.swift' | head -1)
+          if [ -z "$TARGET" ]; then
+            echo "::error::media_kit VideoOutput.swift not found in pub-cache (did 'flutter pub get' run?)"
+            exit 1
+          fi
+          cp docs/fork_VideoOutput.swift "$TARGET"
+          echo "Patched media_kit fork: $TARGET"
+
       - name: Build iOS
         run: |
           flutter build ios --release --no-codesign --dart-define-from-file=pili_release.json
