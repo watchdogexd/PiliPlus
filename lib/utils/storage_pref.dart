@@ -253,7 +253,15 @@ abstract final class Pref {
 
   static String get secondDecode => _setting.get(
     SettingBoxKey.secondDecode,
-    defaultValue: VideoDecodeFormatType.AV1.codes.first,
+    // The vendored iOS libmpv (mpv v0.39.0, melodink "video-default" build) ships
+    // no av1_videotoolbox hwaccel, so AV1 always falls back to software (dav1d) —
+    // even on AV1-capable silicon (A17 Pro+). HEVC/AVC do hardware-decode via
+    // VideoToolbox. Default the iOS second choice to HEVC so high-res tiers that
+    // drop AVC (4K/8K) still land on a hardware-decodable codec instead of AV1.
+    // Users can override; revert this once libmpv ships AV1 VideoToolbox.
+    defaultValue: Platform.isIOS
+        ? VideoDecodeFormatType.HEVC.codes.first
+        : VideoDecodeFormatType.AV1.codes.first,
   );
 
   static String get hardwareDecoding => _setting.get(
