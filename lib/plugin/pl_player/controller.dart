@@ -968,15 +968,6 @@ class PlPlayerController with BlockConfigMixin {
     final opt = {
       'video-sync': Pref.videoSync,
       if (Platform.isAndroid) 'ao': Pref.audioOutput,
-      // EXPERIMENT (iOS AV1 hwdec): mpv's default --hwdec-codecs whitelist may
-      // exclude av1, so hwdec=auto never even asks VideoToolbox for AV1. Forcing
-      // "all" removes mpv's own gate (VideoToolbox still rejects codecs it can't
-      // do, so this is safe). If an AV1 stream then reports hwdec-current=
-      // videotoolbox, this build HAS av1_videotoolbox and the whitelist was the
-      // cause -> keep this + drop the HEVC second-decode default. If AV1 still
-      // reports "no", the libmpv build lacks the hwaccel and only HEVC/AVC will
-      // hardware-decode.
-      if (Platform.isIOS) 'hwdec-codecs': 'all',
       'volume':
           (PlatformUtils.isMobile ? Pref.playerVolume : volume.value * 100)
               .toString(),

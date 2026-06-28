@@ -255,10 +255,13 @@ abstract final class Pref {
     SettingBoxKey.secondDecode,
     // The vendored iOS libmpv (mpv v0.39.0, melodink "video-default" build) ships
     // no av1_videotoolbox hwaccel, so AV1 always falls back to software (dav1d) —
-    // even on AV1-capable silicon (A17 Pro+). HEVC/AVC do hardware-decode via
-    // VideoToolbox. Default the iOS second choice to HEVC so high-res tiers that
-    // drop AVC (4K/8K) still land on a hardware-decodable codec instead of AV1.
-    // Users can override; revert this once libmpv ships AV1 VideoToolbox.
+    // even on AV1-capable silicon. Verified on A19 Pro (iPhone 17 Pro): AV1 reports
+    // VideoParams pixelformat=yuv420p (software) while HEVC/AVC report
+    // pixelformat=videotoolbox (hardware); forcing hwdec-codecs=all made no
+    // difference, so it's the build, not mpv's codec whitelist. Default the iOS
+    // second choice to HEVC so high-res tiers that drop AVC (4K/8K) still land on a
+    // hardware-decodable codec instead of AV1. Users can override; revert once the
+    // vendored libmpv ships an ffmpeg (>=7.1) with the AV1 VideoToolbox hwaccel.
     defaultValue: Platform.isIOS
         ? VideoDecodeFormatType.HEVC.codes.first
         : VideoDecodeFormatType.AV1.codes.first,
